@@ -43,6 +43,8 @@ pub enum NativeSurfaceCommand {
         text: SharedString,
         color: Color,
         font: FontRequest,
+        horizontal_alignment: TextHorizontalAlignment,
+        vertical_alignment: TextVerticalAlignment,
     },
     /// A horizontal or vertical solid line. Arbitrary angled paths are outside
     /// this intentionally small display-list contract.
@@ -87,6 +89,8 @@ pub struct NativeSurfaceTextRun {
     pub text: SharedString,
     pub color: Color,
     pub font: FontRequest,
+    pub horizontal_alignment: TextHorizontalAlignment,
+    pub vertical_alignment: TextVerticalAlignment,
 }
 
 impl HasFont for NativeSurfaceTextRun {
@@ -106,7 +110,7 @@ impl RenderText for NativeSurfaceTextRun {
     fn color(self: core::pin::Pin<&Self>) -> Brush { Brush::SolidColor(self.color) }
     fn link_color(self: core::pin::Pin<&Self>) -> Color { Default::default() }
     fn alignment(self: core::pin::Pin<&Self>) -> (TextHorizontalAlignment, TextVerticalAlignment) {
-        (TextHorizontalAlignment::Left, TextVerticalAlignment::Top)
+        (self.horizontal_alignment, self.vertical_alignment)
     }
     fn wrap(self: core::pin::Pin<&Self>) -> TextWrap { TextWrap::NoWrap }
     fn overflow(self: core::pin::Pin<&Self>) -> TextOverflow { TextOverflow::Clip }
@@ -133,5 +137,18 @@ mod tests {
         assert_eq!(native_surface_frame(17).unwrap().generation, 2);
         clear_native_surface_frame(17);
         assert!(native_surface_frame(17).is_none());
+    }
+
+    #[test]
+    fn text_run_preserves_requested_alignment() {
+        let run = NativeSurfaceTextRun {
+            text: SharedString::from("text"),
+            color: Color::default(),
+            font: Default::default(),
+            horizontal_alignment: TextHorizontalAlignment::Right,
+            vertical_alignment: TextVerticalAlignment::Center,
+        };
+        assert_eq!(core::pin::Pin::new(&run).alignment(),
+            (TextHorizontalAlignment::Right, TextVerticalAlignment::Center));
     }
 }

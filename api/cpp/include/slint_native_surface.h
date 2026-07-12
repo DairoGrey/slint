@@ -10,6 +10,9 @@
 
 namespace slint {
 
+enum class NativeSurfaceHorizontalAlignment : std::uint8_t { Left, Center, Right };
+enum class NativeSurfaceVerticalAlignment : std::uint8_t { Top, Center, Bottom };
+
 /// A bounded primitive in a renderer-backed native surface.
 struct NativeSurfaceCommand {
     enum class Kind : std::uint8_t { FillRect, Text, Line };
@@ -24,6 +27,8 @@ struct NativeSurfaceCommand {
     SharedString font_family;
     float font_size = 0.f;
     std::int32_t font_weight = 400;
+    NativeSurfaceHorizontalAlignment horizontal_alignment = NativeSurfaceHorizontalAlignment::Left;
+    NativeSurfaceVerticalAlignment vertical_alignment = NativeSurfaceVerticalAlignment::Top;
 };
 
 /// Immutable producer-side frame. Publishing copies its commands into Slint's
@@ -68,6 +73,8 @@ public:
                     .font_family_len = command.font_family.size(),
                     .font_size = command.font_size,
                     .font_weight = command.font_weight,
+                    .horizontal_alignment = static_cast<std::uint8_t>(command.horizontal_alignment),
+                    .vertical_alignment = static_cast<std::uint8_t>(command.vertical_alignment),
             });
         }
         cbindgen_private::slint_native_surface_publish(

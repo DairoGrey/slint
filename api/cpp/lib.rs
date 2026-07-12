@@ -18,6 +18,7 @@ use i_slint_core::native_surface::{
     NativeSurfaceCommand, NativeSurfaceFrame, clear_native_surface_frame, publish_native_surface_frame,
 };
 use i_slint_core::items::OperatingSystemType;
+use i_slint_core::items::{TextHorizontalAlignment, TextVerticalAlignment};
 use i_slint_core::slice::Slice;
 use i_slint_core::styled_text::StyledText;
 use i_slint_core::window::{WindowAdapter, ffi::WindowAdapterRcOpaque};
@@ -38,6 +39,8 @@ pub struct NativeSurfaceCommandData {
     font_family_len: usize,
     font_size: f32,
     font_weight: i32,
+    horizontal_alignment: u8,
+    vertical_alignment: u8,
 }
 
 fn ffi_string(data: *const u8, len: usize) -> SharedString {
@@ -79,6 +82,16 @@ pub unsafe extern "C" fn slint_native_surface_publish(
                     weight: Some(command.font_weight),
                     pixel_size: Some(LogicalLength::new(command.font_size)),
                     ..Default::default()
+                },
+                horizontal_alignment: match command.horizontal_alignment {
+                    1 => TextHorizontalAlignment::Center,
+                    2 => TextHorizontalAlignment::Right,
+                    _ => TextHorizontalAlignment::Left,
+                },
+                vertical_alignment: match command.vertical_alignment {
+                    1 => TextVerticalAlignment::Center,
+                    2 => TextVerticalAlignment::Bottom,
+                    _ => TextVerticalAlignment::Top,
                 },
             },
             _ => NativeSurfaceCommand::Line {
