@@ -1,6 +1,8 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
+use alloc::string::ToString;
+
 /// Styled text that has been parsed and separated into paragraphs
 #[repr(transparent)]
 #[derive(Debug, PartialEq, Clone, Default)]
@@ -77,6 +79,33 @@ pub fn get_raw_text(styled_text: &StyledText) -> alloc::borrow::Cow<'_, str> {
             }
             result.into()
         }
+    }
+}
+
+/// Build one styled paragraph with foreground-colour overrides. This is used
+/// by renderer-backed native surfaces, where the producer already supplies
+/// UTF-8 byte ranges and no markdown parsing must occur.
+pub(crate) fn from_colored_spans(
+    text: crate::SharedString,
+    spans: impl Iterator<Item = (core::ops::Range<usize>, u32)>,
+) -> StyledText {
+    let text = text.as_str().to_string();
+    let text_len = text.len();
+    let formatting = spans
+        .filter(|(range, _)| range.start < range.end && range.end <= text_len
+            && text.is_char_boundary(range.start) && text.is_char_boundary(range.end))
+        .map(|(range, color)| i_slint_common::styled_text::FormattedSpan {
+            range,
+            style: i_slint_common::styled_text::Style::Color(color),
+        })
+        .collect();
+    StyledText {
+        paragraphs: [i_slint_common::styled_text::StyledTextParagraph {
+            text,
+            formatting,
+            links: Default::default(),
+        }]
+        .into(),
     }
 }
 

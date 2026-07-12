@@ -1656,13 +1656,14 @@ pub fn draw_native_surface<R: GlyphRenderer>(
                 renderer.restore_state();
             }
             crate::native_surface::NativeSurfaceCommand::Text {
-                x, y, width, height, text, color, font, horizontal_alignment, vertical_alignment,
+                x, y, width, height, text, color, spans, font, horizontal_alignment, vertical_alignment,
             } => {
                 if *width <= 0. || *height <= 0. || text.is_empty() { continue; }
                 renderer.save_state();
                 renderer.translate(LogicalVector::new(*x, *y));
                 let run = crate::native_surface::NativeSurfaceTextRun {
                     text: text.clone(), color: *color, font: font.clone(),
+                    spans: spans.clone(),
                     horizontal_alignment: *horizontal_alignment,
                     vertical_alignment: *vertical_alignment,
                 };
