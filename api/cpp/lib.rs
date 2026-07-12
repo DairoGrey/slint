@@ -80,6 +80,32 @@ fn ffi_text_spans(data: *const NativeSurfaceTextSpanData, len: usize, text_len: 
         .collect()
 }
 
+unsafe fn native_surface_commands(
+    commands: *const NativeSurfaceCommandData,
+    command_count: usize,
+) -> alloc::vec::Vec<NativeSurfaceCommand> {
+    let commands = if commands.is_null() || command_count == 0 { &[] }
+        else { unsafe { core::slice::from_raw_parts(commands, command_count) } };
+    let mut result = alloc::vec::Vec::with_capacity(commands.len());
+    for command in commands {
+        let color = Color::from_argb_encoded(command.color_argb);
+        result.push(match command.kind {
+            0 => NativeSurfaceCommand::FillRect { x: command.x, y: command.y, width: command.width, height: command.height, color },
+            1 => NativeSurfaceCommand::Text {
+                x: command.x, y: command.y, width: command.width, height: command.height,
+                text: ffi_string(command.text, command.text_len), color,
+                spans: ffi_text_spans(command.text_spans, command.text_span_count, command.text_len),
+                font: FontRequest { family: Some(ffi_string(command.font_family, command.font_family_len)),
+                    weight: Some(command.font_weight), pixel_size: Some(LogicalLength::new(command.font_size)), ..Default::default() },
+                horizontal_alignment: match command.horizontal_alignment { 1 => TextHorizontalAlignment::Center, 2 => TextHorizontalAlignment::Right, _ => TextHorizontalAlignment::Left },
+                vertical_alignment: match command.vertical_alignment { 1 => TextVerticalAlignment::Center, 2 => TextVerticalAlignment::Bottom, _ => TextVerticalAlignment::Top },
+            },
+            _ => NativeSurfaceCommand::Line { x: command.x, y: command.y, width: command.width, height: command.height, color },
+        });
+    }
+    result
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_native_surface_publish(
     surface_id: i32,
@@ -87,50 +113,27 @@ pub unsafe extern "C" fn slint_native_surface_publish(
     commands: *const NativeSurfaceCommandData,
     command_count: usize,
 ) {
-    let commands = if commands.is_null() || command_count == 0 {
-        &[]
-    } else {
-        unsafe { core::slice::from_raw_parts(commands, command_count) }
+    let frame = NativeSurfaceFrame {
+        generation,
+        base_generation: generation,
+        overlay_generation: generation,
+        commands: unsafe { native_surface_commands(commands, command_count) },
+        overlay_commands: Default::default(),
     };
-    let mut frame = NativeSurfaceFrame { generation, commands: alloc::vec::Vec::with_capacity(commands.len()) };
-    for command in commands {
-        let color = Color::from_argb_encoded(command.color_argb);
-        let converted = match command.kind {
-            0 => NativeSurfaceCommand::FillRect {
-                x: command.x, y: command.y, width: command.width, height: command.height, color,
-            },
-            1 => NativeSurfaceCommand::Text {
-                x: command.x,
-                y: command.y,
-                width: command.width,
-                height: command.height,
-                text: ffi_string(command.text, command.text_len),
-                color,
-                spans: ffi_text_spans(command.text_spans, command.text_span_count, command.text_len),
-                font: FontRequest {
-                    family: Some(ffi_string(command.font_family, command.font_family_len)),
-                    weight: Some(command.font_weight),
-                    pixel_size: Some(LogicalLength::new(command.font_size)),
-                    ..Default::default()
-                },
-                horizontal_alignment: match command.horizontal_alignment {
-                    1 => TextHorizontalAlignment::Center,
-                    2 => TextHorizontalAlignment::Right,
-                    _ => TextHorizontalAlignment::Left,
-                },
-                vertical_alignment: match command.vertical_alignment {
-                    1 => TextVerticalAlignment::Center,
-                    2 => TextVerticalAlignment::Bottom,
-                    _ => TextVerticalAlignment::Top,
-                },
-            },
-            _ => NativeSurfaceCommand::Line {
-                x: command.x, y: command.y, width: command.width, height: command.height, color,
-            },
-        };
-        frame.commands.push(converted);
-    }
     publish_native_surface_frame(surface_id, frame);
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slint_native_surface_publish_layers(
+    surface_id: i32, generation: u64, base_generation: u64, overlay_generation: u64,
+    base: *const NativeSurfaceCommandData, base_count: usize,
+    overlay: *const NativeSurfaceCommandData, overlay_count: usize,
+) {
+    publish_native_surface_frame(surface_id, NativeSurfaceFrame {
+        generation, base_generation, overlay_generation,
+        commands: unsafe { native_surface_commands(base, base_count) },
+        overlay_commands: unsafe { native_surface_commands(overlay, overlay_count) },
+    });
 }
 
 #[unsafe(no_mangle)]

@@ -49,12 +49,21 @@ public:
 
     void set_generation(std::uint64_t generation) { generation_ = generation; }
     [[nodiscard]] std::uint64_t generation() const { return generation_; }
+    void set_base_generation(std::uint64_t generation) { base_generation_ = generation; }
+    void set_overlay_generation(std::uint64_t generation) { overlay_generation_ = generation; }
+    [[nodiscard]] std::uint64_t base_generation() const { return base_generation_; }
+    [[nodiscard]] std::uint64_t overlay_generation() const { return overlay_generation_; }
     [[nodiscard]] std::vector<NativeSurfaceCommand> &commands() { return commands_; }
     [[nodiscard]] const std::vector<NativeSurfaceCommand> &commands() const { return commands_; }
+    [[nodiscard]] std::vector<NativeSurfaceCommand> &overlay_commands() { return overlay_commands_; }
+    [[nodiscard]] const std::vector<NativeSurfaceCommand> &overlay_commands() const { return overlay_commands_; }
 
 private:
     std::uint64_t generation_ = 0;
+    std::uint64_t base_generation_ = 0;
+    std::uint64_t overlay_generation_ = 0;
     std::vector<NativeSurfaceCommand> commands_;
+    std::vector<NativeSurfaceCommand> overlay_commands_;
     friend class NativeSurfaceRegistry;
 };
 
@@ -67,13 +76,14 @@ class NativeSurfaceRegistry {
 public:
     static void publish(std::int32_t surface_id, const NativeSurfaceFrame &frame)
     {
-        std::vector<cbindgen_private::NativeSurfaceTextSpanData> spans;
-        std::vector<cbindgen_private::NativeSurfaceCommandData> commands;
-        std::size_t span_count = 0;
-        for (const auto &command : frame.commands_) span_count += command.text_spans.size();
-        spans.reserve(span_count);
-        commands.reserve(frame.commands_.size());
-        for (const auto &command : frame.commands_) {
+        const auto encode = [](const std::vector<NativeSurfaceCommand>& source,
+                               std::vector<cbindgen_private::NativeSurfaceCommandData>& commands,
+                               std::vector<cbindgen_private::NativeSurfaceTextSpanData>& spans) {
+            std::size_t span_count = 0;
+            for (const auto &command : source) span_count += command.text_spans.size();
+            spans.reserve(span_count);
+            commands.reserve(source.size());
+            for (const auto &command : source) {
             const auto first_span = spans.size();
             for (const auto &span : command.text_spans) {
                 spans.push_back({
@@ -100,9 +110,17 @@ public:
                     .horizontal_alignment = static_cast<std::uint8_t>(command.horizontal_alignment),
                     .vertical_alignment = static_cast<std::uint8_t>(command.vertical_alignment),
             });
-        }
-        cbindgen_private::slint_native_surface_publish(
-                surface_id, frame.generation_, commands.data(), commands.size());
+            }
+        };
+        std::vector<cbindgen_private::NativeSurfaceCommandData> commands;
+        std::vector<cbindgen_private::NativeSurfaceTextSpanData> spans;
+        std::vector<cbindgen_private::NativeSurfaceCommandData> overlay_commands;
+        std::vector<cbindgen_private::NativeSurfaceTextSpanData> overlay_spans;
+        encode(frame.commands_, commands, spans);
+        encode(frame.overlay_commands_, overlay_commands, overlay_spans);
+        cbindgen_private::slint_native_surface_publish_layers(
+                surface_id, frame.generation_, frame.base_generation_, frame.overlay_generation_,
+                commands.data(), commands.size(), overlay_commands.data(), overlay_commands.size());
     }
 
     static void clear(std::int32_t surface_id)
