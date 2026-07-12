@@ -1586,8 +1586,10 @@ component WindowItem {
     ///
     /// This must be called while processing an active pointer press, such as
     /// from a custom title bar's `TouchArea.pointer-event` handler. Returns
-    /// `true` if the platform accepted the request. Backends that do not
-    /// support native window moves return `false`.
+    /// `true` if the platform accepted the request. When accepted, Slint
+    /// cancels its active pointer gesture because the platform may consume the
+    /// matching release event. Backends that do not support native window
+    /// moves return `false`.
     function start-system-move() -> bool {
     }
 }

@@ -1525,7 +1525,12 @@ impl WindowItem {
         window_adapter: &Rc<dyn WindowAdapter>,
         self_rc: &ItemRc,
     ) -> bool {
-        is_root_window_item(window_adapter, self_rc) && window_adapter.start_system_move()
+        if !is_root_window_item(window_adapter, self_rc) || !window_adapter.start_system_move() {
+            return false;
+        }
+
+        WindowInner::from_pub(window_adapter.window()).cancel_mouse_input_after_dispatch();
+        true
     }
 }
 

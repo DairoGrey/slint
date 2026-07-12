@@ -593,6 +593,10 @@ pub struct WindowInner {
     /// When the window is visible, keep a strong reference
     strong_component_ref: RefCell<Option<ItemTreeRc>>,
     mouse_input_state: Cell<MouseInputState>,
+    /// A native system move took ownership of the active pointer gesture. The
+    /// current dispatch clears the Slint input stack after its callback returns
+    /// because some platforms do not send the matching pointer release back.
+    cancel_mouse_input_after_dispatch: Cell<bool>,
     touch_state: RefCell<TouchState>,
 
     /// ItemRC that currently have the focus (possibly an instance of TextInput)
@@ -658,6 +662,7 @@ impl WindowInner {
             component: Default::default(),
             strong_component_ref: Default::default(),
             mouse_input_state: Default::default(),
+            cancel_mouse_input_after_dispatch: Default::default(),
             touch_state: Default::default(),
             pinned_fields: Box::pin(WindowPinnedFields {
                 redraw_tracker,
@@ -1033,6 +1038,18 @@ impl WindowInner {
             window_adapter.set_mouse_cursor(mouse_input_state.cursor.clone());
         }
 
+        if self.cancel_mouse_input_after_dispatch.replace(false) {
+            let mut cancelled_input_state = MouseInputState::default();
+            crate::input::send_exit_events(
+                &mouse_input_state,
+                &mut cancelled_input_state,
+                None,
+                &window_adapter,
+            );
+            mouse_input_state = cancelled_input_state;
+            self.click_state.reset();
+        }
+
         let is_dragging = mouse_input_state.drag_data.is_some();
         let drag_action = mouse_input_state.drop_target_action();
         self.mouse_input_state.set(mouse_input_state);
@@ -1084,6 +1101,15 @@ impl WindowInner {
     /// back, and a drop back onto this window can restore the data. Set by `offer_native_drag`.
     pub(crate) fn set_native_drag(&self, drag: Option<NativePendingDrag>) {
         *self.native_drag.borrow_mut() = drag;
+    }
+
+    /// Clear active Slint pointer state after the current input dispatch.
+    ///
+    /// Native window moves take over the pointer sequence. On platforms such
+    /// as Wayland, the compositor can consume the matching release event, so
+    /// the regular input path would otherwise leave `TouchArea` grabs stuck.
+    pub(crate) fn cancel_mouse_input_after_dispatch(&self) {
+        self.cancel_mouse_input_after_dispatch.set(true);
     }
 
     /// Report that the in-flight native drag finished with `action`.
