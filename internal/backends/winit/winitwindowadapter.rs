@@ -1297,6 +1297,10 @@ impl WindowAdapter for WinitWindowAdapter {
         }
     }
 
+    fn start_system_move(&self) -> bool {
+        self.winit_window().is_some_and(|window| window.drag_window().is_ok())
+    }
+
     fn set_size(&self, size: corelib::api::WindowSize) {
         self.has_explicit_size.set(true);
         // TODO: don't ignore error, propagate to caller

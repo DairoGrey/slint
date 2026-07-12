@@ -1519,6 +1519,14 @@ impl WindowItem {
         }
         let _ = WindowInner::from_pub(window_adapter.window()).hide();
     }
+
+    pub fn start_system_move(
+        self: Pin<&Self>,
+        window_adapter: &Rc<dyn WindowAdapter>,
+        self_rc: &ItemRc,
+    ) -> bool {
+        is_root_window_item(window_adapter, self_rc) && window_adapter.start_system_move()
+    }
 }
 
 /// A `WindowItem` is considered the adapter's root window only when it is at index 0 of
@@ -1565,6 +1573,21 @@ pub unsafe extern "C" fn slint_windowitem_hide(
         let window_adapter = &*(window_adapter as *const Rc<dyn WindowAdapter>);
         let item_rc = ItemRc::new(self_component.clone(), self_index);
         window_item.hide(window_adapter, &item_rc);
+    }
+}
+
+#[cfg(feature = "ffi")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slint_windowitem_start_system_move(
+    window_item: Pin<&WindowItem>,
+    window_adapter: *const crate::window::ffi::WindowAdapterRcOpaque,
+    self_component: &vtable::VRc<crate::item_tree::ItemTreeVTable>,
+    self_index: u32,
+) -> bool {
+    unsafe {
+        let window_adapter = &*(window_adapter as *const Rc<dyn WindowAdapter>);
+        let item_rc = ItemRc::new(self_component.clone(), self_index);
+        window_item.start_system_move(window_adapter, &item_rc)
     }
 }
 
