@@ -50,19 +50,25 @@ public:
     void set_generation(std::uint64_t generation) { generation_ = generation; }
     [[nodiscard]] std::uint64_t generation() const { return generation_; }
     void set_base_generation(std::uint64_t generation) { base_generation_ = generation; }
+    void set_underlay_generation(std::uint64_t generation) { underlay_generation_ = generation; }
     void set_overlay_generation(std::uint64_t generation) { overlay_generation_ = generation; }
     [[nodiscard]] std::uint64_t base_generation() const { return base_generation_; }
+    [[nodiscard]] std::uint64_t underlay_generation() const { return underlay_generation_; }
     [[nodiscard]] std::uint64_t overlay_generation() const { return overlay_generation_; }
     [[nodiscard]] std::vector<NativeSurfaceCommand> &commands() { return commands_; }
     [[nodiscard]] const std::vector<NativeSurfaceCommand> &commands() const { return commands_; }
+    [[nodiscard]] std::vector<NativeSurfaceCommand> &underlay_commands() { return underlay_commands_; }
+    [[nodiscard]] const std::vector<NativeSurfaceCommand> &underlay_commands() const { return underlay_commands_; }
     [[nodiscard]] std::vector<NativeSurfaceCommand> &overlay_commands() { return overlay_commands_; }
     [[nodiscard]] const std::vector<NativeSurfaceCommand> &overlay_commands() const { return overlay_commands_; }
 
 private:
     std::uint64_t generation_ = 0;
     std::uint64_t base_generation_ = 0;
+    std::uint64_t underlay_generation_ = 0;
     std::uint64_t overlay_generation_ = 0;
     std::vector<NativeSurfaceCommand> commands_;
+    std::vector<NativeSurfaceCommand> underlay_commands_;
     std::vector<NativeSurfaceCommand> overlay_commands_;
     friend class NativeSurfaceRegistry;
 };
@@ -116,11 +122,15 @@ public:
         std::vector<cbindgen_private::NativeSurfaceTextSpanData> spans;
         std::vector<cbindgen_private::NativeSurfaceCommandData> overlay_commands;
         std::vector<cbindgen_private::NativeSurfaceTextSpanData> overlay_spans;
+        std::vector<cbindgen_private::NativeSurfaceCommandData> underlay_commands;
+        std::vector<cbindgen_private::NativeSurfaceTextSpanData> underlay_spans;
         encode(frame.commands_, commands, spans);
+        encode(frame.underlay_commands_, underlay_commands, underlay_spans);
         encode(frame.overlay_commands_, overlay_commands, overlay_spans);
         cbindgen_private::slint_native_surface_publish_layers(
-                surface_id, frame.generation_, frame.base_generation_, frame.overlay_generation_,
-                commands.data(), commands.size(), overlay_commands.data(), overlay_commands.size());
+                surface_id, frame.generation_, frame.base_generation_, frame.underlay_generation_, frame.overlay_generation_,
+                commands.data(), commands.size(), underlay_commands.data(), underlay_commands.size(),
+                overlay_commands.data(), overlay_commands.size());
     }
 
     static void clear(std::int32_t surface_id)

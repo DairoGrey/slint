@@ -28,10 +28,12 @@ pub struct NativeSurfaceFrame {
     pub generation: u64,
     /// Generation of immutable content commands.
     pub base_generation: u64,
+    pub underlay_generation: u64,
     /// Generation of transient overlay commands.
     pub overlay_generation: u64,
     /// Commands are positioned in the local coordinate system of the item.
     pub commands: Vec<NativeSurfaceCommand>,
+    pub underlay_commands: Vec<NativeSurfaceCommand>,
     /// Commands drawn after `commands`, for carets, selection and other
     /// transient overlays.
     pub overlay_commands: Vec<NativeSurfaceCommand>,
@@ -156,17 +158,19 @@ mod tests {
         publish_native_surface_frame(17, NativeSurfaceFrame {
             generation: 1,
             base_generation: 1,
+            underlay_generation: 1,
             overlay_generation: 1,
             commands: alloc::vec![NativeSurfaceCommand::FillRect {
                 x: 1., y: 2., width: 3., height: 4., color: Color::from_rgb_u8(1, 2, 3),
             }],
+            underlay_commands: Default::default(),
             overlay_commands: Default::default(),
         });
         let first = native_surface_frame(17).unwrap();
         assert_eq!(first.generation, 1);
         publish_native_surface_frame(17, NativeSurfaceFrame {
-            generation: 2, base_generation: 2, overlay_generation: 2,
-            commands: Default::default(), overlay_commands: Default::default(),
+            generation: 2, base_generation: 2, underlay_generation: 2, overlay_generation: 2,
+            commands: Default::default(), underlay_commands: Default::default(), overlay_commands: Default::default(),
         });
         assert_eq!(first.generation, 1);
         assert_eq!(native_surface_frame(17).unwrap().generation, 2);
