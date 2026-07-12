@@ -1637,7 +1637,7 @@ pub fn draw_native_surface<R: GlyphRenderer>(
         renderer.restore_state();
         return;
     }
-    for command in &frame.commands {
+    for command in frame.commands.iter().chain(frame.overlay_commands.iter()) {
         match command {
             crate::native_surface::NativeSurfaceCommand::FillRect { x, y, width, height, color }
             | crate::native_surface::NativeSurfaceCommand::Line { x, y, width, height, color } => {
