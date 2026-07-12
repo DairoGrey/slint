@@ -109,6 +109,16 @@ pub trait WindowAdapter {
     /// Called from [`Window::set_position()`]
     fn set_position(&self, _position: WindowPosition) {}
 
+    /// Ask the platform window manager to start an interactive system move.
+    ///
+    /// Callers must invoke this from an active pointer press. This matters on
+    /// Wayland, where the compositor requires the serial associated with that
+    /// input event. The default implementation reports that the backend does
+    /// not support system moves.
+    fn start_system_move(&self) -> bool {
+        false
+    }
+
     /// Request a new size for the window to the specified size on the screen, in physical or logical pixels
     /// and excluding a window frame (if present).
     ///

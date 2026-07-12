@@ -1,0 +1,12 @@
+export component SystemMoveWindow inherits Window {
+    in-out property <bool> move-requested: false;
+
+    TouchArea {
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down
+                    && event.button == PointerEventButton.left) {
+                root.move-requested = root.start-system-move();
+            }
+        }
+    }
+}
