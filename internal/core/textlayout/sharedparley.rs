@@ -11,8 +11,8 @@ use crate::{
     item_rendering::PlainOrStyledText,
     items::TextStrokeStyle,
     lengths::{
-        LogicalBorderRadius, LogicalLength, LogicalPoint, LogicalRect, LogicalSize, PhysicalPx,
-        PointLengths, RectLengths, ScaleFactor, SizeLengths,
+        LogicalBorderRadius, LogicalLength, LogicalPoint, LogicalRect, LogicalSize, LogicalVector,
+        PhysicalPx, PointLengths, RectLengths, ScaleFactor, SizeLengths,
     },
     renderer::RendererSealed,
     textlayout::{TextHorizontalAlignment, TextOverflow, TextVerticalAlignment, TextWrap},
@@ -229,6 +229,71 @@ pub fn draw_text(
             }
         },
     );
+}
+
+/// Draws the immutable frame of a [`crate::items::NativeSurfaceItem`].
+///
+/// The current item transform is already the surface's local coordinate space,
+/// so every command only needs a short local translation. Keeping this helper
+/// here makes all vector-font renderers share the exact text shaping path.
+pub fn draw_native_surface<R: GlyphRenderer>(
+    renderer: &mut R,
+    surface: core::pin::Pin<&crate::items::NativeSurfaceItem>,
+    self_rc: &crate::items::ItemRc,
+    size: LogicalSize,
+) {
+    let Some(frame) = crate::native_surface::native_surface_frame(surface.surface_id()) else {
+        return;
+    };
+    renderer.save_state();
+    if !renderer.combine_clip(
+        LogicalRect::from(size),
+        LogicalBorderRadius::zero(),
+        LogicalLength::zero(),
+    ) {
+        renderer.restore_state();
+        return;
+    }
+    for command in &frame.commands {
+        match command {
+            crate::native_surface::NativeSurfaceCommand::FillRect { x, y, width, height, color }
+            | crate::native_surface::NativeSurfaceCommand::Line { x, y, width, height, color } => {
+                if *width <= 0. || *height <= 0. { continue; }
+                renderer.save_state();
+                renderer.translate(LogicalVector::new(*x, *y));
+                let rectangle = crate::native_surface::NativeSurfaceRectangle(*color);
+                let rectangle = core::pin::Pin::new(&rectangle);
+                let cache = crate::item_rendering::CachedRenderingData::default();
+                renderer.draw_rectangle(
+                    rectangle,
+                    self_rc,
+                    LogicalSize::new(*width, *height),
+                    &cache,
+                );
+                renderer.restore_state();
+            }
+            crate::native_surface::NativeSurfaceCommand::Text {
+                x, y, width, height, text, color, font,
+            } => {
+                if *width <= 0. || *height <= 0. || text.is_empty() { continue; }
+                renderer.save_state();
+                renderer.translate(LogicalVector::new(*x, *y));
+                let run = crate::native_surface::NativeSurfaceTextRun {
+                    text: text.clone(), color: *color, font: font.clone(),
+                };
+                let run = core::pin::Pin::new(&run);
+                draw_text(
+                    renderer,
+                    run,
+                    Some(self_rc),
+                    LogicalSize::new(*width, *height),
+                    None,
+                );
+                renderer.restore_state();
+            }
+        }
+    }
+    renderer.restore_state();
 }
 
 #[cfg(feature = "std")]

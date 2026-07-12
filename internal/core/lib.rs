@@ -50,6 +50,7 @@ pub mod layout;
 pub mod lengths;
 pub mod menus;
 pub mod model;
+pub mod native_surface;
 pub mod partial_renderer;
 pub mod platform;
 pub mod properties;

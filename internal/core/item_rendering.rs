@@ -488,6 +488,13 @@ pub trait ItemRenderer {
         _self_rc: &ItemRc,
         _size: LogicalSize,
     );
+    /// Renders a bounded, host-published display-list surface.
+    fn draw_native_surface(
+        &mut self,
+        surface: Pin<&crate::items::NativeSurfaceItem>,
+        self_rc: &ItemRc,
+        size: LogicalSize,
+    );
     #[cfg(feature = "path")]
     fn draw_path(&mut self, path: Pin<&Path>, _self_rc: &ItemRc, _size: LogicalSize);
     fn draw_box_shadow(
