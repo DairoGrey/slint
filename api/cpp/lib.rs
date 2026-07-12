@@ -35,6 +35,8 @@ pub struct NativeSurfaceCommandData {
     color_argb: u32,
     text: *const u8,
     text_len: usize,
+    text_spans: *const NativeSurfaceTextSpanData,
+    text_span_count: usize,
     font_family: *const u8,
     font_family_len: usize,
     font_size: f32,
@@ -43,12 +45,39 @@ pub struct NativeSurfaceCommandData {
     vertical_alignment: u8,
 }
 
+#[repr(C)]
+pub struct NativeSurfaceTextSpanData {
+    start_byte: u32,
+    end_byte: u32,
+    color_argb: u32,
+}
+
 fn ffi_string(data: *const u8, len: usize) -> SharedString {
     if data.is_null() || len == 0 {
         return SharedString::default();
     }
     let bytes = unsafe { core::slice::from_raw_parts(data, len) };
     core::str::from_utf8(bytes).map(SharedString::from).unwrap_or_default()
+}
+
+fn ffi_text_spans(data: *const NativeSurfaceTextSpanData, len: usize, text_len: usize)
+    -> alloc::vec::Vec<i_slint_core::native_surface::NativeSurfaceTextSpan>
+{
+    if data.is_null() || len == 0 {
+        return Default::default();
+    }
+    unsafe { core::slice::from_raw_parts(data, len) }
+        .iter()
+        .filter_map(|span| {
+            let start = span.start_byte as usize;
+            let end = span.end_byte as usize;
+            (start < end && end <= text_len).then_some(i_slint_core::native_surface::NativeSurfaceTextSpan {
+                start_byte: start,
+                end_byte: end,
+                color: Color::from_argb_encoded(span.color_argb),
+            })
+        })
+        .collect()
 }
 
 #[unsafe(no_mangle)]
@@ -77,6 +106,7 @@ pub unsafe extern "C" fn slint_native_surface_publish(
                 height: command.height,
                 text: ffi_string(command.text, command.text_len),
                 color,
+                spans: ffi_text_spans(command.text_spans, command.text_span_count, command.text_len),
                 font: FontRequest {
                     family: Some(ffi_string(command.font_family, command.font_family_len)),
                     weight: Some(command.font_weight),

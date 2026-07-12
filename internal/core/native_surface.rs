@@ -16,6 +16,7 @@ use crate::SharedString;
 use alloc::collections::BTreeMap;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
+use core::ops::Range;
 use core::cell::RefCell;
 use crate::thread_local;
 
@@ -42,6 +43,8 @@ pub enum NativeSurfaceCommand {
         height: f32,
         text: SharedString,
         color: Color,
+        /// Optional foreground-colour overrides for byte ranges in `text`.
+        spans: Vec<NativeSurfaceTextSpan>,
         font: FontRequest,
         horizontal_alignment: TextHorizontalAlignment,
         vertical_alignment: TextVerticalAlignment,
@@ -49,6 +52,14 @@ pub enum NativeSurfaceCommand {
     /// A horizontal or vertical solid line. Arbitrary angled paths are outside
     /// this intentionally small display-list contract.
     Line { x: f32, y: f32, width: f32, height: f32, color: Color },
+}
+
+/// A foreground-colour override within a UTF-8 text command.
+#[derive(Clone)]
+pub struct NativeSurfaceTextSpan {
+    pub start_byte: usize,
+    pub end_byte: usize,
+    pub color: Color,
 }
 
 thread_local! {
@@ -88,6 +99,7 @@ impl RenderRectangle for NativeSurfaceRectangle {
 pub struct NativeSurfaceTextRun {
     pub text: SharedString,
     pub color: Color,
+    pub spans: Vec<NativeSurfaceTextSpan>,
     pub font: FontRequest,
     pub horizontal_alignment: TextHorizontalAlignment,
     pub vertical_alignment: TextVerticalAlignment,
@@ -101,7 +113,17 @@ impl HasFont for NativeSurfaceTextRun {
 
 impl RenderString for NativeSurfaceTextRun {
     fn text(self: core::pin::Pin<&Self>) -> PlainOrStyledText {
-        PlainOrStyledText::Plain(self.text.clone())
+        if self.spans.is_empty() {
+            PlainOrStyledText::Plain(self.text.clone())
+        } else {
+            PlainOrStyledText::Styled(crate::styled_text::from_colored_spans(
+                self.text.clone(),
+                self.spans.iter().map(|span| (Range {
+                    start: span.start_byte,
+                    end: span.end_byte,
+                }, span.color.as_argb_encoded())),
+            ))
+        }
     }
 }
 
@@ -144,11 +166,32 @@ mod tests {
         let run = NativeSurfaceTextRun {
             text: SharedString::from("text"),
             color: Color::default(),
+            spans: Default::default(),
             font: Default::default(),
             horizontal_alignment: TextHorizontalAlignment::Right,
             vertical_alignment: TextVerticalAlignment::Center,
         };
         assert_eq!(core::pin::Pin::new(&run).alignment(),
             (TextHorizontalAlignment::Right, TextVerticalAlignment::Center));
+    }
+
+    #[test]
+    fn text_run_preserves_colored_utf8_spans() {
+        let run = NativeSurfaceTextRun {
+            text: SharedString::from("a·b"),
+            color: Color::from_rgb_u8(1, 2, 3),
+            spans: alloc::vec![NativeSurfaceTextSpan {
+                start_byte: 1,
+                end_byte: 3,
+                color: Color::from_rgb_u8(4, 5, 6),
+            }],
+            font: Default::default(),
+            horizontal_alignment: TextHorizontalAlignment::Left,
+            vertical_alignment: TextVerticalAlignment::Top,
+        };
+        match core::pin::Pin::new(&run).text() {
+            PlainOrStyledText::Styled(_) => {}
+            PlainOrStyledText::Plain(_) => panic!("coloured span lost"),
+        }
     }
 }

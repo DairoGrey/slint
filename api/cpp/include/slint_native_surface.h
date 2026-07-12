@@ -13,6 +13,15 @@ namespace slint {
 enum class NativeSurfaceHorizontalAlignment : std::uint8_t { Left, Center, Right };
 enum class NativeSurfaceVerticalAlignment : std::uint8_t { Top, Center, Bottom };
 
+/// A coloured byte range within a UTF-8 NativeSurfaceCommand::Text payload.
+/// Ranges must be ordered, non-overlapping and align with UTF-8 boundaries.
+/// The base command colour remains the fallback outside these ranges.
+struct NativeSurfaceTextSpan {
+    std::uint32_t start_byte = 0;
+    std::uint32_t end_byte = 0;
+    std::uint32_t color_argb = 0;
+};
+
 /// A bounded primitive in a renderer-backed native surface.
 struct NativeSurfaceCommand {
     enum class Kind : std::uint8_t { FillRect, Text, Line };
@@ -24,6 +33,7 @@ struct NativeSurfaceCommand {
     float height = 0.f;
     std::uint32_t color_argb = 0;
     SharedString text;
+    std::vector<NativeSurfaceTextSpan> text_spans;
     SharedString font_family;
     float font_size = 0.f;
     std::int32_t font_weight = 400;
@@ -57,9 +67,21 @@ class NativeSurfaceRegistry {
 public:
     static void publish(std::int32_t surface_id, const NativeSurfaceFrame &frame)
     {
+        std::vector<cbindgen_private::NativeSurfaceTextSpanData> spans;
         std::vector<cbindgen_private::NativeSurfaceCommandData> commands;
+        std::size_t span_count = 0;
+        for (const auto &command : frame.commands_) span_count += command.text_spans.size();
+        spans.reserve(span_count);
         commands.reserve(frame.commands_.size());
         for (const auto &command : frame.commands_) {
+            const auto first_span = spans.size();
+            for (const auto &span : command.text_spans) {
+                spans.push_back({
+                    .start_byte = span.start_byte,
+                    .end_byte = span.end_byte,
+                    .color_argb = span.color_argb,
+                });
+            }
             commands.push_back({
                     .kind = static_cast<std::uint8_t>(command.kind),
                     .x = command.x,
@@ -69,6 +91,8 @@ public:
                     .color_argb = command.color_argb,
                     .text = reinterpret_cast<const std::uint8_t *>(command.text.data()),
                     .text_len = command.text.size(),
+                    .text_spans = command.text_spans.empty() ? nullptr : spans.data() + first_span,
+                    .text_span_count = command.text_spans.size(),
                     .font_family = reinterpret_cast<const std::uint8_t *>(command.font_family.data()),
                     .font_family_len = command.font_family.size(),
                     .font_size = command.font_size,
