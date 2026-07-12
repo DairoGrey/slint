@@ -116,8 +116,10 @@ pub unsafe extern "C" fn slint_native_surface_publish(
     let frame = NativeSurfaceFrame {
         generation,
         base_generation: generation,
+        underlay_generation: generation,
         overlay_generation: generation,
         commands: unsafe { native_surface_commands(commands, command_count) },
+        underlay_commands: Default::default(),
         overlay_commands: Default::default(),
     };
     publish_native_surface_frame(surface_id, frame);
@@ -125,13 +127,15 @@ pub unsafe extern "C" fn slint_native_surface_publish(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_native_surface_publish_layers(
-    surface_id: i32, generation: u64, base_generation: u64, overlay_generation: u64,
+    surface_id: i32, generation: u64, base_generation: u64, underlay_generation: u64, overlay_generation: u64,
     base: *const NativeSurfaceCommandData, base_count: usize,
+    underlay: *const NativeSurfaceCommandData, underlay_count: usize,
     overlay: *const NativeSurfaceCommandData, overlay_count: usize,
 ) {
     publish_native_surface_frame(surface_id, NativeSurfaceFrame {
-        generation, base_generation, overlay_generation,
+        generation, base_generation, underlay_generation, overlay_generation,
         commands: unsafe { native_surface_commands(base, base_count) },
+        underlay_commands: unsafe { native_surface_commands(underlay, underlay_count) },
         overlay_commands: unsafe { native_surface_commands(overlay, overlay_count) },
     });
 }
