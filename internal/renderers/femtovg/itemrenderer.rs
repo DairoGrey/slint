@@ -358,6 +358,17 @@ impl<'a, R: femtovg::Renderer + TextureImporter> ItemRenderer for GLItemRenderer
         sharedparley::draw_text_input(self, text_input, self_rc, size, None);
     }
 
+    fn draw_native_surface(
+        &mut self,
+        surface: Pin<&items::NativeSurfaceItem>,
+        self_rc: &ItemRc,
+        size: LogicalSize,
+    ) {
+        if !self.global_alpha_transparent() {
+            sharedparley::draw_native_surface(self, surface, self_rc, size);
+        }
+    }
+
     fn draw_path(&mut self, path: Pin<&items::Path>, item_rc: &ItemRc, _size: LogicalSize) {
         if self.global_alpha_transparent() {
             return;

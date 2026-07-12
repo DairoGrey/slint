@@ -12,12 +12,88 @@ use alloc::rc::Rc;
 use alloc::string::ToString;
 use core::ffi::c_void;
 use i_slint_core::SharedString;
+use i_slint_core::graphics::{Color, FontRequest};
+use i_slint_core::lengths::LogicalLength;
+use i_slint_core::native_surface::{
+    NativeSurfaceCommand, NativeSurfaceFrame, clear_native_surface_frame, publish_native_surface_frame,
+};
 use i_slint_core::items::OperatingSystemType;
 use i_slint_core::slice::Slice;
 use i_slint_core::styled_text::StyledText;
 use i_slint_core::window::{WindowAdapter, ffi::WindowAdapterRcOpaque};
 
 pub mod platform;
+
+#[repr(C)]
+pub struct NativeSurfaceCommandData {
+    kind: u8,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    color_argb: u32,
+    text: *const u8,
+    text_len: usize,
+    font_family: *const u8,
+    font_family_len: usize,
+    font_size: f32,
+    font_weight: i32,
+}
+
+fn ffi_string(data: *const u8, len: usize) -> SharedString {
+    if data.is_null() || len == 0 {
+        return SharedString::default();
+    }
+    let bytes = unsafe { core::slice::from_raw_parts(data, len) };
+    core::str::from_utf8(bytes).map(SharedString::from).unwrap_or_default()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slint_native_surface_publish(
+    surface_id: i32,
+    generation: u64,
+    commands: *const NativeSurfaceCommandData,
+    command_count: usize,
+) {
+    let commands = if commands.is_null() || command_count == 0 {
+        &[]
+    } else {
+        unsafe { core::slice::from_raw_parts(commands, command_count) }
+    };
+    let mut frame = NativeSurfaceFrame { generation, commands: alloc::vec::Vec::with_capacity(commands.len()) };
+    for command in commands {
+        let color = Color::from_argb_encoded(command.color_argb);
+        let converted = match command.kind {
+            0 => NativeSurfaceCommand::FillRect {
+                x: command.x, y: command.y, width: command.width, height: command.height, color,
+            },
+            1 => NativeSurfaceCommand::Text {
+                x: command.x,
+                y: command.y,
+                width: command.width,
+                height: command.height,
+                text: ffi_string(command.text, command.text_len),
+                color,
+                font: FontRequest {
+                    family: Some(ffi_string(command.font_family, command.font_family_len)),
+                    weight: Some(command.font_weight),
+                    pixel_size: Some(LogicalLength::new(command.font_size)),
+                    ..Default::default()
+                },
+            },
+            _ => NativeSurfaceCommand::Line {
+                x: command.x, y: command.y, width: command.width, height: command.height, color,
+            },
+        };
+        frame.commands.push(converted);
+    }
+    publish_native_surface_frame(surface_id, frame);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn slint_native_surface_clear(surface_id: i32) {
+    clear_native_surface_frame(surface_id);
+}
 
 #[cfg(feature = "i-slint-backend-selector")]
 use i_slint_backend_selector::with_platform;

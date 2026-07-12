@@ -863,6 +863,21 @@ export component TouchArea {
     //-default_size_binding:expands_to_parent_geometry
 }
 
+/// A clipped renderer-backed surface populated by the public C++ native
+/// surface registry. It deliberately exposes only pointer and scroll input;
+/// keyboard focus stays with the surrounding Slint component.
+export component NativeSurfaceItem {
+    in property <int> surface-id;
+    in property <int> frame-generation;
+    in property <bool> enabled: true;
+    in property <MouseCursor> mouse-cursor;
+    out property <length> mouse-x;
+    out property <length> mouse-y;
+    callback pointer-event(event: PointerEvent);
+    callback scroll-event(event: PointerScrollEvent) -> EventResult;
+    //-default_size_binding:expands_to_parent_geometry
+}
+
 /// ```slint playground
 /// export component Example inherits Window {
 ///     width: 100px;

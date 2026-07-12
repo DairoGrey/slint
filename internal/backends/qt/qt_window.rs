@@ -922,6 +922,18 @@ impl ItemRenderer for QtItemRenderer<'_> {
         self.restore_state();
     }
 
+    fn draw_native_surface(
+        &mut self,
+        surface: Pin<&items::NativeSurfaceItem>,
+        self_rc: &ItemRc,
+        size: LogicalSize,
+    ) {
+        self.save_state();
+        self.pixel_align_origin();
+        sharedparley::draw_native_surface(self, surface, self_rc, size);
+        self.restore_state();
+    }
+
     fn draw_path(&mut self, path: Pin<&items::Path>, item_rc: &ItemRc, size: LogicalSize) {
         let (offset, path_events) = match path.fitted_path_events(item_rc) {
             Some(offset_and_events) => offset_and_events,

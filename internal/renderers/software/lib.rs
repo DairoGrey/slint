@@ -3074,6 +3074,20 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
         }
     }
 
+    fn draw_native_surface(
+        &mut self,
+        surface: Pin<&i_slint_core::items::NativeSurfaceItem>,
+        self_rc: &ItemRc,
+        size: LogicalSize,
+    ) {
+        #[cfg(feature = "systemfonts")]
+        sharedparley::draw_native_surface(self, surface, self_rc, size);
+        #[cfg(not(feature = "systemfonts"))]
+        {
+            let _ = (surface, self_rc, size);
+        }
+    }
+
     #[cfg(all(feature = "std", not(feature = "path")))]
     fn draw_path(
         &mut self,

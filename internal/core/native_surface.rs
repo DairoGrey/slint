@@ -1,0 +1,137 @@
+// Copyright © SixtyFPS GmbH <info@slint.dev>
+// SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
+
+//! A small, renderer-backed display-list surface for host integrations.
+//!
+//! Native surfaces deliberately are not item trees. A producer publishes an
+//! immutable bounded frame and Slint renders it inside one clipped item.
+
+use crate::graphics::{Brush, Color, FontRequest};
+use crate::item_rendering::{
+    HasFont, PlainOrStyledText, RenderRectangle, RenderString, RenderText,
+};
+use crate::items::{TextHorizontalAlignment, TextOverflow, TextStrokeStyle, TextVerticalAlignment, TextWrap};
+use crate::lengths::LogicalLength;
+use crate::SharedString;
+use alloc::collections::BTreeMap;
+use alloc::rc::Rc;
+use alloc::vec::Vec;
+use core::cell::RefCell;
+use crate::thread_local;
+
+/// One immutable display list consumed by a [`crate::items::NativeSurfaceItem`].
+#[derive(Clone, Default)]
+pub struct NativeSurfaceFrame {
+    /// Monotonically increasing producer generation. Renderers do not attach
+    /// semantics to it, but it is useful for diagnostics and tests.
+    pub generation: u64,
+    /// Commands are positioned in the local coordinate system of the item.
+    pub commands: Vec<NativeSurfaceCommand>,
+}
+
+/// A primitive command accepted by native-surface renderers.
+#[derive(Clone)]
+pub enum NativeSurfaceCommand {
+    /// A solid filled rectangle.
+    FillRect { x: f32, y: f32, width: f32, height: f32, color: Color },
+    /// A text run with an explicit font request and local origin.
+    Text {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        text: SharedString,
+        color: Color,
+        font: FontRequest,
+    },
+    /// A horizontal or vertical solid line. Arbitrary angled paths are outside
+    /// this intentionally small display-list contract.
+    Line { x: f32, y: f32, width: f32, height: f32, color: Color },
+}
+
+thread_local! {
+    static SURFACES: RefCell<BTreeMap<i32, Rc<NativeSurfaceFrame>>> = Default::default();
+}
+
+/// Replaces the immutable frame associated with `surface_id`.
+///
+/// This is deliberately UI-thread local. Host applications must publish from
+/// their event-loop callback, which also gives renderers a race-free snapshot.
+pub fn publish_native_surface_frame(surface_id: i32, frame: NativeSurfaceFrame) {
+    SURFACES.with(|surfaces| {
+        surfaces.borrow_mut().insert(surface_id, Rc::new(frame));
+    });
+}
+
+/// Removes the frame for an inactive surface.
+pub fn clear_native_surface_frame(surface_id: i32) {
+    SURFACES.with(|surfaces| {
+        surfaces.borrow_mut().remove(&surface_id);
+    });
+}
+
+/// Returns the current immutable frame for `surface_id`.
+pub fn native_surface_frame(surface_id: i32) -> Option<Rc<NativeSurfaceFrame>> {
+    SURFACES.with(|surfaces| surfaces.borrow().get(&surface_id).cloned())
+}
+
+/// Lightweight rectangle adapter used by renderer implementations.
+pub struct NativeSurfaceRectangle(pub Color);
+
+impl RenderRectangle for NativeSurfaceRectangle {
+    fn background(self: core::pin::Pin<&Self>) -> Brush { Brush::SolidColor(self.0) }
+}
+
+/// Lightweight text adapter used by renderer implementations.
+pub struct NativeSurfaceTextRun {
+    pub text: SharedString,
+    pub color: Color,
+    pub font: FontRequest,
+}
+
+impl HasFont for NativeSurfaceTextRun {
+    fn font_request(self: core::pin::Pin<&Self>, _self_rc: &crate::items::ItemRc) -> FontRequest {
+        self.font.clone()
+    }
+}
+
+impl RenderString for NativeSurfaceTextRun {
+    fn text(self: core::pin::Pin<&Self>) -> PlainOrStyledText {
+        PlainOrStyledText::Plain(self.text.clone())
+    }
+}
+
+impl RenderText for NativeSurfaceTextRun {
+    fn target_size(self: core::pin::Pin<&Self>) -> crate::lengths::LogicalSize { Default::default() }
+    fn color(self: core::pin::Pin<&Self>) -> Brush { Brush::SolidColor(self.color) }
+    fn link_color(self: core::pin::Pin<&Self>) -> Color { Default::default() }
+    fn alignment(self: core::pin::Pin<&Self>) -> (TextHorizontalAlignment, TextVerticalAlignment) {
+        (TextHorizontalAlignment::Left, TextVerticalAlignment::Top)
+    }
+    fn wrap(self: core::pin::Pin<&Self>) -> TextWrap { TextWrap::NoWrap }
+    fn overflow(self: core::pin::Pin<&Self>) -> TextOverflow { TextOverflow::Clip }
+    fn stroke(self: core::pin::Pin<&Self>) -> (Brush, LogicalLength, TextStrokeStyle) { Default::default() }
+    fn is_markdown(self: core::pin::Pin<&Self>) -> bool { false }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registry_replaces_and_clears_immutable_frames() {
+        publish_native_surface_frame(17, NativeSurfaceFrame {
+            generation: 1,
+            commands: alloc::vec![NativeSurfaceCommand::FillRect {
+                x: 1., y: 2., width: 3., height: 4., color: Color::from_rgb_u8(1, 2, 3),
+            }],
+        });
+        let first = native_surface_frame(17).unwrap();
+        assert_eq!(first.generation, 1);
+        publish_native_surface_frame(17, NativeSurfaceFrame { generation: 2, commands: Default::default() });
+        assert_eq!(first.generation, 1);
+        assert_eq!(native_surface_frame(17).unwrap().generation, 2);
+        clear_native_surface_frame(17);
+        assert!(native_surface_frame(17).is_none());
+    }
+}
