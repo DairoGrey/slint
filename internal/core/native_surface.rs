@@ -18,6 +18,7 @@ use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::ops::Range;
 use core::cell::RefCell;
+use core::ffi::c_void;
 use crate::thread_local;
 
 /// One immutable display list consumed by a [`crate::items::NativeSurfaceItem`].
@@ -97,6 +98,34 @@ pub struct NativeSurfaceTextSpan {
 
 thread_local! {
     static SURFACES: RefCell<BTreeMap<i32, Rc<NativeSurfaceFrame>>> = Default::default();
+    // The callback is intentionally UI-thread-local, just like the surface
+    // registry. It is a diagnostic lifecycle hook for hosts; renderers do not
+    // retain host state or depend on a callback being installed.
+    static RENDERED_CALLBACK: RefCell<Option<NativeSurfaceRenderedCallback>> = Default::default();
+}
+
+#[derive(Clone, Copy)]
+pub struct NativeSurfaceRenderedCallback {
+    pub callback: unsafe extern "C" fn(i32, u64, *mut c_void),
+    pub user_data: *mut c_void,
+}
+
+/// Installs (or clears) the callback emitted after a native surface has been
+/// rendered by the active backend. The callback runs on Slint's UI thread.
+pub fn set_native_surface_rendered_callback(callback: Option<NativeSurfaceRenderedCallback>) {
+    RENDERED_CALLBACK.with(|slot| *slot.borrow_mut() = callback);
+}
+
+/// Called by the shared native-surface drawing path after all three layers
+/// have reached the renderer. This marks backend draw completion; final OS
+/// compositor presentation remains backend/driver controlled.
+#[allow(unsafe_code)] // FFI callback is installed only by the public C++ bridge.
+pub fn notify_native_surface_rendered(surface_id: i32, generation: u64) {
+    RENDERED_CALLBACK.with(|slot| {
+        if let Some(callback) = *slot.borrow() {
+            unsafe { (callback.callback)(surface_id, generation, callback.user_data) };
+        }
+    });
 }
 
 /// Replaces the immutable frame associated with `surface_id`.
