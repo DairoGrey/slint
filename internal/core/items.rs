@@ -61,8 +61,8 @@ mod input_items;
 pub use input_items::*;
 mod image;
 pub use self::image::*;
-mod native_surface;
-pub use self::native_surface::*;
+mod render_surface;
+pub use self::render_surface::*;
 mod drag_n_drop;
 pub use drag_n_drop::*;
 #[cfg(feature = "path")]
@@ -227,7 +227,7 @@ pub struct ItemVTable {
 pub type ItemRef<'a> = vtable::VRef<'a, ItemVTable>;
 
 declare_item_vtable! {
-    fn slint_get_NativeSurfaceItemVTable() -> NativeSurfaceItemVTable for native_surface::NativeSurfaceItem
+    fn slint_get_RenderSurfaceItemVTable() -> RenderSurfaceItemVTable for render_surface::RenderSurfaceItem
 }
 
 #[repr(C)]

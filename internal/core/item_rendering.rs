@@ -489,9 +489,9 @@ pub trait ItemRenderer {
         _size: LogicalSize,
     );
     /// Renders a bounded, host-published display-list surface.
-    fn draw_native_surface(
+    fn draw_render_surface(
         &mut self,
-        surface: Pin<&crate::items::NativeSurfaceItem>,
+        surface: Pin<&crate::items::RenderSurfaceItem>,
         self_rc: &ItemRc,
         size: LogicalSize,
     );

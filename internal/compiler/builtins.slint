@@ -863,12 +863,14 @@ export component TouchArea {
     //-default_size_binding:expands_to_parent_geometry
 }
 
-/// A clipped renderer-backed surface populated by the public C++ native
+/// A clipped renderer-backed surface populated by the public C++ render
 /// surface registry. It deliberately exposes only pointer and scroll input;
 /// keyboard focus stays with the surrounding Slint component.
-export component NativeSurfaceItem {
+export component RenderSurfaceItem {
     in property <int> surface-id;
     in property <int> frame-generation;
+    in property <length> content-offset-x;
+    in property <length> content-offset-y;
     in property <bool> enabled: true;
     in property <MouseCursor> mouse-cursor;
     out property <length> mouse-x;

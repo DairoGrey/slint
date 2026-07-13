@@ -701,14 +701,14 @@ impl ItemRenderer for SkiaItemRenderer<'_> {
         }
     }
 
-    fn draw_native_surface(
+    fn draw_render_surface(
         &mut self,
-        surface: Pin<&i_slint_core::items::NativeSurfaceItem>,
+        surface: Pin<&i_slint_core::items::RenderSurfaceItem>,
         self_rc: &i_slint_core::items::ItemRc,
         size: LogicalSize,
     ) {
         let restore = self.save_canvas_and_pixel_align_origin();
-        sharedparley::draw_native_surface(self, surface, self_rc, size);
+        sharedparley::draw_render_surface(self, surface, self_rc, size);
         if restore {
             self.canvas.restore();
         }

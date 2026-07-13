@@ -12,8 +12,8 @@ use crate::{
     item_rendering::PlainOrStyledText,
     items::TextStrokeStyle,
     lengths::{
-        LogicalBorderRadius, LogicalLength, LogicalPoint, LogicalRect, LogicalSize, LogicalVector, PhysicalPx,
-        PointLengths, ScaleFactor, SizeLengths,
+        LogicalBorderRadius, LogicalLength, LogicalPoint, LogicalRect, LogicalSize, LogicalVector,
+        PhysicalPx, PointLengths, ScaleFactor, SizeLengths,
     },
     renderer::RendererSealed,
     textlayout::{TextHorizontalAlignment, TextOverflow, TextVerticalAlignment, TextWrap},
@@ -1498,7 +1498,7 @@ pub fn draw_text(
 }
 
 /// Draw text and expose the exact Parley layout immediately before it is
-/// rendered. Native surfaces use this to publish hit-test geometry without a
+/// rendered. Render surfaces use this to publish hit-test geometry without a
 /// second shaping pass. The callback must not retain the borrowed layout.
 fn draw_text_impl(
     item_renderer: &mut impl GlyphRenderer,
@@ -1632,30 +1632,28 @@ fn draw_text_impl(
 /// Draw text while exposing a renderer-neutral cluster snapshot produced by
 /// the exact Parley layout that is about to be drawn. This keeps the private
 /// `Layout` implementation detail inside the shared text module.
-pub fn draw_text_with_native_surface_layout(
+pub fn draw_text_with_render_surface_layout(
     item_renderer: &mut impl GlyphRenderer,
     text: Pin<&dyn crate::item_rendering::RenderText>,
     item_rc: Option<&crate::item_tree::ItemRc>,
     size: LogicalSize,
     cache: Option<&TextLayoutCache>,
     layout_key: u64,
-    mut observe_layout: impl FnMut(crate::native_surface::NativeSurfaceLayoutSnapshot),
+    mut observe_layout: impl FnMut(crate::render_surface::RenderSurfaceLayoutSnapshot),
 ) {
     let scale_factor = ScaleFactor::new(item_renderer.scale_factor());
     draw_text_impl(item_renderer, text, item_rc, size, cache, |layout| {
-        observe_layout(native_surface_layout_snapshot(layout_key, layout, scale_factor));
+        observe_layout(render_surface_layout_snapshot(layout_key, layout, scale_factor));
     });
 }
 
-fn native_surface_layout_snapshot(
+fn render_surface_layout_snapshot(
     layout_key: u64,
     layout: &Layout,
     scale_factor: ScaleFactor,
-) -> crate::native_surface::NativeSurfaceLayoutSnapshot {
-    let mut snapshot = crate::native_surface::NativeSurfaceLayoutSnapshot {
-        layout_key,
-        ..Default::default()
-    };
+) -> crate::render_surface::RenderSurfaceLayoutSnapshot {
+    let mut snapshot =
+        crate::render_surface::RenderSurfaceLayoutSnapshot { layout_key, ..Default::default() };
     if layout_key == 0 {
         return snapshot;
     }
@@ -1666,13 +1664,14 @@ fn native_surface_layout_snapshot(
     for paragraph in &layout.paragraphs {
         for line in paragraph.layout.lines() {
             let metrics = line.metrics();
-            snapshot.baseline = (layout.y_offset.get() + paragraph.y.get() + metrics.baseline) / scale;
+            snapshot.baseline =
+                (layout.y_offset.get() + paragraph.y.get() + metrics.baseline) / scale;
             snapshot.advance = snapshot.advance.max(metrics.advance / scale);
             let mut x = metrics.offset + metrics.inline_min_coord;
             for run in line.runs() {
                 for cluster in run.visual_clusters() {
                     let range = cluster.text_range();
-                    snapshot.clusters.push(crate::native_surface::NativeSurfaceLayoutCluster {
+                    snapshot.clusters.push(crate::render_surface::RenderSurfaceLayoutCluster {
                         start_byte: range.start as u32,
                         end_byte: range.end as u32,
                         x: x / scale,
@@ -1686,23 +1685,26 @@ fn native_surface_layout_snapshot(
     snapshot
 }
 
-/// Draws the immutable frame of a [`crate::items::NativeSurfaceItem`].
+/// Draws the immutable frame of a [`crate::items::RenderSurfaceItem`].
 ///
 /// The current item transform is already the surface's local coordinate space,
 /// so every command only needs a short local translation. Keeping this helper
 /// here makes all vector-font renderers share the exact text shaping path.
-pub fn draw_native_surface<R: GlyphRenderer>(
+pub fn draw_render_surface<R: GlyphRenderer>(
     renderer: &mut R,
-    surface: core::pin::Pin<&crate::items::NativeSurfaceItem>,
+    surface: core::pin::Pin<&crate::items::RenderSurfaceItem>,
     self_rc: &crate::items::ItemRc,
     size: LogicalSize,
 ) {
-    let Some(frame) = crate::native_surface::native_surface_frame(surface.surface_id()) else {
+    let Some(frame) = crate::render_surface::render_surface_frame(surface.surface_id()) else {
         return;
     };
-    crate::native_surface::notify_native_surface_draw_started(
-        surface.surface_id(), frame.generation, frame.commands.len(),
-        frame.underlay_commands.len(), frame.overlay_commands.len(),
+    crate::render_surface::notify_render_surface_draw_started(
+        surface.surface_id(),
+        frame.generation,
+        frame.commands.len(),
+        frame.underlay_commands.len(),
+        frame.overlay_commands.len(),
     );
     renderer.save_state();
     if !renderer.combine_clip(
@@ -1711,6 +1713,13 @@ pub fn draw_native_surface<R: GlyphRenderer>(
         LogicalLength::zero(),
     ) {
         renderer.restore_state();
+        // A clipped frame is complete from the registry producer's point of
+        // view. Omitting this notification leaves latest-wins producers
+        // permanently blocked behind a frame that can never draw.
+        crate::render_surface::notify_render_surface_processed(
+            surface.surface_id(),
+            frame.generation,
+        );
         return;
     }
     // Layout snapshots are deliberately delivered once after the draw loop.
@@ -1718,14 +1727,38 @@ pub fn draw_native_surface<R: GlyphRenderer>(
     // renderer repeatedly cross the Rust/C++ boundary while glyph work was
     // still in progress.
     let mut layout_snapshots = Vec::new();
-    for command in frame.underlay_commands.iter().chain(frame.commands.iter()).chain(frame.overlay_commands.iter()) {
+    let content_offset =
+        LogicalVector::new(surface.content_offset_x().get(), surface.content_offset_y().get());
+    let intersects_surface = |x: f32, y: f32, width: f32, height: f32| {
+        width > 0.
+            && height > 0.
+            && x + content_offset.x < size.width
+            && y + content_offset.y < size.height
+            && x + content_offset.x + width > 0.
+            && y + content_offset.y + height > 0.
+    };
+    renderer.translate(content_offset);
+    for command in frame
+        .underlay_commands
+        .iter()
+        .chain(frame.commands.iter())
+        .chain(frame.overlay_commands.iter())
+    {
         match command {
-            crate::native_surface::NativeSurfaceCommand::FillRect { x, y, width, height, color }
-            | crate::native_surface::NativeSurfaceCommand::Line { x, y, width, height, color } => {
-                if *width <= 0. || *height <= 0. { continue; }
+            crate::render_surface::RenderSurfaceCommand::FillRect {
+                x,
+                y,
+                width,
+                height,
+                color,
+            }
+            | crate::render_surface::RenderSurfaceCommand::Line { x, y, width, height, color } => {
+                if !intersects_surface(*x, *y, *width, *height) {
+                    continue;
+                }
                 renderer.save_state();
                 renderer.translate(LogicalVector::new(*x, *y));
-                let rectangle = crate::native_surface::NativeSurfaceRectangle(*color);
+                let rectangle = crate::render_surface::RenderSurfaceRectangle(*color);
                 let rectangle = core::pin::Pin::new(&rectangle);
                 let cache = crate::item_rendering::CachedRenderingData::default();
                 renderer.draw_rectangle(
@@ -1736,21 +1769,35 @@ pub fn draw_native_surface<R: GlyphRenderer>(
                 );
                 renderer.restore_state();
             }
-            crate::native_surface::NativeSurfaceCommand::Text {
-                layout_key, x, y, width, height, text, color, spans, font, horizontal_alignment, vertical_alignment,
+            crate::render_surface::RenderSurfaceCommand::Text {
+                layout_key,
+                x,
+                y,
+                width,
+                height,
+                text,
+                color,
+                spans,
+                font,
+                horizontal_alignment,
+                vertical_alignment,
             } => {
-                if *width <= 0. || *height <= 0. || text.is_empty() { continue; }
+                if text.is_empty() || !intersects_surface(*x, *y, *width, *height) {
+                    continue;
+                }
                 renderer.save_state();
                 renderer.translate(LogicalVector::new(*x, *y));
-                let run = crate::native_surface::NativeSurfaceTextRun {
-                    text: text.clone(), color: *color, font: font.clone(),
+                let run = crate::render_surface::RenderSurfaceTextRun {
+                    text: text.clone(),
+                    color: *color,
+                    font: font.clone(),
                     spans: spans.clone(),
                     horizontal_alignment: *horizontal_alignment,
                     vertical_alignment: *vertical_alignment,
                 };
                 let run = core::pin::Pin::new(&run);
                 let mut snapshot = None;
-                draw_text_with_native_surface_layout(
+                draw_text_with_render_surface_layout(
                     renderer,
                     run,
                     Some(self_rc),
@@ -1760,14 +1807,19 @@ pub fn draw_native_surface<R: GlyphRenderer>(
                     |value| snapshot = Some(value),
                 );
                 renderer.restore_state();
-                if let Some(snapshot) = snapshot { layout_snapshots.push(snapshot); }
+                if let Some(snapshot) = snapshot {
+                    layout_snapshots.push(snapshot);
+                }
             }
         }
     }
     renderer.restore_state();
-    crate::native_surface::notify_native_surface_layout_batch(
-        surface.surface_id(), frame.base_generation, &layout_snapshots);
-    crate::native_surface::notify_native_surface_rendered(surface.surface_id(), frame.generation);
+    crate::render_surface::notify_render_surface_layout_batch(
+        surface.surface_id(),
+        frame.base_generation,
+        &layout_snapshots,
+    );
+    crate::render_surface::notify_render_surface_processed(surface.surface_id(), frame.generation);
 }
 
 #[cfg(feature = "std")]

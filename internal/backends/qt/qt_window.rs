@@ -922,15 +922,15 @@ impl ItemRenderer for QtItemRenderer<'_> {
         self.restore_state();
     }
 
-    fn draw_native_surface(
+    fn draw_render_surface(
         &mut self,
-        surface: Pin<&items::NativeSurfaceItem>,
+        surface: Pin<&items::RenderSurfaceItem>,
         self_rc: &ItemRc,
         size: LogicalSize,
     ) {
         self.save_state();
         self.pixel_align_origin();
-        sharedparley::draw_native_surface(self, surface, self_rc, size);
+        sharedparley::draw_render_surface(self, surface, self_rc, size);
         self.restore_state();
     }
 

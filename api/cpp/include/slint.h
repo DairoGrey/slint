@@ -12,7 +12,7 @@
 #include "private/slint_item_tree.h"
 #include "private/slint_keys.h"
 #include "private/slint_data_transfer.h"
-#include "slint_native_surface.h"
+#include "slint_render_surface.h"
 
 #include <vector>
 #include <chrono>
