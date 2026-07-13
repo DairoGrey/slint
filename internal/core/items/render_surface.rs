@@ -1,11 +1,11 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
-//! The builtin item backing the public native-surface display-list API.
+//! The builtin item backing the public render-surface display-list API.
 
 use super::{
-    EventResult, FocusEvent, FocusEventResult, InputEventFilterResult, InputEventResult, Item, ItemConsts,
-    ItemRc, ItemRendererRef, KeyEventResult, LogicalLength, LogicalRect, LogicalSize,
+    EventResult, FocusEvent, FocusEventResult, InputEventFilterResult, InputEventResult, Item,
+    ItemConsts, ItemRc, ItemRendererRef, KeyEventResult, LogicalLength, LogicalRect, LogicalSize,
     MouseCursor, PointerEvent, PointerEventArg, PointerEventButton, PointerEventKind,
     PointerScrollEvent, PointerScrollEventArg, RenderingResult,
 };
@@ -24,9 +24,11 @@ use i_slint_core_macros::*;
 #[derive(FieldOffsets, Default, SlintElement)]
 #[pin]
 /// One clipped input and display-list surface.
-pub struct NativeSurfaceItem {
+pub struct RenderSurfaceItem {
     pub surface_id: Property<i32>,
     pub frame_generation: Property<i32>,
+    pub content_offset_x: Property<LogicalLength>,
+    pub content_offset_y: Property<LogicalLength>,
     pub enabled: Property<bool>,
     pub mouse_cursor: Property<MouseCursor>,
     pub mouse_x: Property<LogicalLength>,
@@ -37,15 +39,21 @@ pub struct NativeSurfaceItem {
     grabbed: Cell<bool>,
 }
 
-impl NativeSurfaceItem {
+impl RenderSurfaceItem {
     fn notify_pointer(self: Pin<&Self>, event: &MouseEvent, window_adapter: &WindowAdapterRc) {
         let Some(position) = event.position() else { return };
         Self::FIELD_OFFSETS.mouse_x().apply_pin(self).set(position.x_length());
         Self::FIELD_OFFSETS.mouse_y().apply_pin(self).set(position.y_length());
         let (button, kind, touch_finger_id) = match event {
-            MouseEvent::Pressed { button, touch_finger_id, .. } => (*button, PointerEventKind::Down, *touch_finger_id),
-            MouseEvent::Released { button, touch_finger_id, .. } => (*button, PointerEventKind::Up, *touch_finger_id),
-            MouseEvent::Moved { touch_finger_id, .. } => (PointerEventButton::Other, PointerEventKind::Move, *touch_finger_id),
+            MouseEvent::Pressed { button, touch_finger_id, .. } => {
+                (*button, PointerEventKind::Down, *touch_finger_id)
+            }
+            MouseEvent::Released { button, touch_finger_id, .. } => {
+                (*button, PointerEventKind::Up, *touch_finger_id)
+            }
+            MouseEvent::Moved { touch_finger_id, .. } => {
+                (PointerEventButton::Other, PointerEventKind::Move, *touch_finger_id)
+            }
             _ => return,
         };
         Self::FIELD_OFFSETS.pointer_event().apply_pin(self).call(&(PointerEvent {
@@ -57,7 +65,7 @@ impl NativeSurfaceItem {
     }
 }
 
-impl Item for NativeSurfaceItem {
+impl Item for RenderSurfaceItem {
     fn init(self: Pin<&Self>, _self_rc: &ItemRc) {}
 
     fn deinit(self: Pin<&Self>, _window_adapter: &WindowAdapterRc) {}
@@ -79,7 +87,8 @@ impl Item for NativeSurfaceItem {
         _self_rc: &ItemRc,
         cursor: &mut MouseCursor,
     ) -> InputEventFilterResult {
-        if !self.enabled() || matches!(event, MouseEvent::DragMove { .. } | MouseEvent::Drop { .. }) {
+        if !self.enabled() || matches!(event, MouseEvent::DragMove { .. } | MouseEvent::Drop { .. })
+        {
             return InputEventFilterResult::ForwardAndIgnore;
         }
         if event.position().is_some() && !matches!(event, MouseEvent::Exit) {
@@ -113,15 +122,17 @@ impl Item for NativeSurfaceItem {
             }
             MouseEvent::Moved { .. } => {
                 self.notify_pointer(event, window_adapter);
-                if self.grabbed.get() { InputEventResult::GrabMouse } else { InputEventResult::EventAccepted }
+                if self.grabbed.get() {
+                    InputEventResult::GrabMouse
+                } else {
+                    InputEventResult::EventAccepted
+                }
             }
             MouseEvent::Wheel { delta_x, delta_y, .. } => {
                 let modifiers = window_adapter.window().0.context().0.modifiers.get().into();
-                match Self::FIELD_OFFSETS.scroll_event().apply_pin(self).call(&(PointerScrollEvent {
-                    delta_x: *delta_x,
-                    delta_y: *delta_y,
-                    modifiers,
-                },)) {
+                match Self::FIELD_OFFSETS.scroll_event().apply_pin(self).call(&(
+                    PointerScrollEvent { delta_x: *delta_x, delta_y: *delta_y, modifiers },
+                )) {
                     EventResult::Accept => InputEventResult::EventAccepted,
                     EventResult::Reject => InputEventResult::EventIgnored,
                 }
@@ -136,8 +147,10 @@ impl Item for NativeSurfaceItem {
                 },));
                 InputEventResult::EventAccepted
             }
-            MouseEvent::PinchGesture { .. } | MouseEvent::RotationGesture { .. }
-            | MouseEvent::DragMove { .. } | MouseEvent::Drop { .. } => InputEventResult::EventIgnored,
+            MouseEvent::PinchGesture { .. }
+            | MouseEvent::RotationGesture { .. }
+            | MouseEvent::DragMove { .. }
+            | MouseEvent::Drop { .. } => InputEventResult::EventIgnored,
         }
     }
 
@@ -146,21 +159,27 @@ impl Item for NativeSurfaceItem {
         _event: &InternalKeyEvent,
         _window_adapter: &WindowAdapterRc,
         _self_rc: &ItemRc,
-    ) -> KeyEventResult { KeyEventResult::EventIgnored }
+    ) -> KeyEventResult {
+        KeyEventResult::EventIgnored
+    }
 
     fn key_event(
         self: Pin<&Self>,
         _event: &InternalKeyEvent,
         _window_adapter: &WindowAdapterRc,
         _self_rc: &ItemRc,
-    ) -> KeyEventResult { KeyEventResult::EventIgnored }
+    ) -> KeyEventResult {
+        KeyEventResult::EventIgnored
+    }
 
     fn focus_event(
         self: Pin<&Self>,
         _event: &FocusEvent,
         _window_adapter: &WindowAdapterRc,
         _self_rc: &ItemRc,
-    ) -> FocusEventResult { FocusEventResult::FocusIgnored }
+    ) -> FocusEventResult {
+        FocusEventResult::FocusIgnored
+    }
 
     fn render(
         self: Pin<&Self>,
@@ -171,7 +190,7 @@ impl Item for NativeSurfaceItem {
         // Register the generated property with Slint's dirty tracker. The
         // frame registry itself deliberately is not a property store.
         let _ = self.frame_generation();
-        (*backend).draw_native_surface(self, self_rc, size);
+        (*backend).draw_render_surface(self, self_rc, size);
         RenderingResult::ContinueRenderingChildren
     }
 
@@ -180,14 +199,18 @@ impl Item for NativeSurfaceItem {
         _window_adapter: &WindowAdapterRc,
         _self_rc: &ItemRc,
         geometry: LogicalRect,
-    ) -> LogicalRect { geometry }
+    ) -> LogicalRect {
+        geometry
+    }
 
-    fn clips_children(self: Pin<&Self>) -> bool { true }
+    fn clips_children(self: Pin<&Self>) -> bool {
+        true
+    }
 }
 
-impl ItemConsts for NativeSurfaceItem {
+impl ItemConsts for RenderSurfaceItem {
     const cached_rendering_data_offset: const_field_offset::FieldOffset<
-        NativeSurfaceItem,
+        RenderSurfaceItem,
         CachedRenderingData,
-    > = NativeSurfaceItem::FIELD_OFFSETS.cached_rendering_data().as_unpinned_projection();
+    > = RenderSurfaceItem::FIELD_OFFSETS.cached_rendering_data().as_unpinned_projection();
 }

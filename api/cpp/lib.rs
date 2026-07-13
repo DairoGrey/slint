@@ -14,32 +14,31 @@ use core::cell::RefCell;
 use core::ffi::c_void;
 use i_slint_core::SharedString;
 use i_slint_core::graphics::{Color, FontRequest};
-use i_slint_core::lengths::LogicalLength;
-use i_slint_core::native_surface::{
-    NativeSurfaceCommand, NativeSurfaceFrame, NativeSurfaceLayerMask, clear_native_surface_frame,
-    publish_native_surface_frame, publish_native_surface_frame_delta,
-    NativeSurfaceDrawStartedCallback, NativeSurfaceLayoutBatchCallback, NativeSurfaceRenderedCallback,
-    set_native_surface_draw_started_callback, set_native_surface_layout_batch_callback,
-    set_native_surface_rendered_callback,
-};
 use i_slint_core::items::OperatingSystemType;
 use i_slint_core::items::{TextHorizontalAlignment, TextVerticalAlignment};
+use i_slint_core::lengths::LogicalLength;
+use i_slint_core::render_surface::{
+    RenderSurfaceCommand, RenderSurfaceDrawStartedCallback, RenderSurfaceFrame,
+    RenderSurfaceLayerMask, RenderSurfaceLayoutBatchCallback, RenderSurfaceProcessedCallback,
+    clear_render_surface_frame, publish_render_surface_frame, publish_render_surface_frame_delta,
+    set_render_surface_draw_started_callback, set_render_surface_layout_batch_callback,
+    set_render_surface_processed_callback,
+};
 use i_slint_core::slice::Slice;
 use i_slint_core::styled_text::StyledText;
 use i_slint_core::window::{WindowAdapter, ffi::WindowAdapterRcOpaque};
 
-type NativeSurfaceLayoutCxxCallback = unsafe extern "C" fn(
-    i32, u64, *const NativeSurfaceLayoutBatchData, *mut c_void,
-);
+type RenderSurfaceLayoutCxxCallback =
+    unsafe extern "C" fn(i32, u64, *const RenderSurfaceLayoutBatchData, *mut c_void);
 
 i_slint_core::thread_local! {
-    static NATIVE_SURFACE_LAYOUT_CXX_CALLBACK: RefCell<Option<(NativeSurfaceLayoutCxxCallback, *mut c_void)>> = Default::default();
+    static RENDER_SURFACE_LAYOUT_CXX_CALLBACK: RefCell<Option<(RenderSurfaceLayoutCxxCallback, *mut c_void)>> = Default::default();
 }
 
 pub mod platform;
 
 #[repr(C)]
-pub struct NativeSurfaceCommandData {
+pub struct RenderSurfaceCommandData {
     kind: u8,
     layout_key: u64,
     x: f32,
@@ -49,7 +48,7 @@ pub struct NativeSurfaceCommandData {
     color_argb: u32,
     text: *const u8,
     text_len: usize,
-    text_spans: *const NativeSurfaceTextSpanData,
+    text_spans: *const RenderSurfaceTextSpanData,
     text_span_count: usize,
     font_family: *const u8,
     font_family_len: usize,
@@ -60,14 +59,14 @@ pub struct NativeSurfaceCommandData {
 }
 
 #[repr(C)]
-pub struct NativeSurfaceTextSpanData {
+pub struct RenderSurfaceTextSpanData {
     start_byte: u32,
     end_byte: u32,
     color_argb: u32,
 }
 
 #[repr(C)]
-pub struct NativeSurfaceLayoutClusterData {
+pub struct RenderSurfaceLayoutClusterData {
     start_byte: u32,
     end_byte: u32,
     x: f32,
@@ -75,16 +74,16 @@ pub struct NativeSurfaceLayoutClusterData {
 }
 
 #[repr(C)]
-pub struct NativeSurfaceLayoutSnapshotData {
+pub struct RenderSurfaceLayoutSnapshotData {
     layout_key: u64,
     baseline: f32,
     advance: f32,
-    clusters: *const NativeSurfaceLayoutClusterData,
+    clusters: *const RenderSurfaceLayoutClusterData,
     cluster_count: usize,
 }
 
 #[repr(C)]
-pub struct NativeSurfaceLayoutBatchEntryData {
+pub struct RenderSurfaceLayoutBatchEntryData {
     layout_key: u64,
     baseline: f32,
     advance: f32,
@@ -93,38 +92,55 @@ pub struct NativeSurfaceLayoutBatchEntryData {
 }
 
 #[repr(C)]
-pub struct NativeSurfaceLayoutBatchData {
-    entries: *const NativeSurfaceLayoutBatchEntryData,
+pub struct RenderSurfaceLayoutBatchData {
+    entries: *const RenderSurfaceLayoutBatchEntryData,
     entry_count: usize,
-    clusters: *const NativeSurfaceLayoutClusterData,
+    clusters: *const RenderSurfaceLayoutClusterData,
     cluster_count: usize,
 }
 
-unsafe extern "C" fn native_surface_layout_callback_bridge(
+unsafe extern "C" fn render_surface_layout_callback_bridge(
     surface_id: i32,
     base_generation: u64,
-    snapshots: *const i_slint_core::native_surface::NativeSurfaceLayoutSnapshot,
+    snapshots: *const i_slint_core::render_surface::RenderSurfaceLayoutSnapshot,
     snapshot_count: usize,
     _user_data: *mut c_void,
 ) {
-    if snapshots.is_null() || snapshot_count == 0 { return; }
+    if snapshots.is_null() || snapshot_count == 0 {
+        return;
+    }
     let snapshots = unsafe { core::slice::from_raw_parts(snapshots, snapshot_count) };
-    NATIVE_SURFACE_LAYOUT_CXX_CALLBACK.with(|slot| {
-        let Some((callback, user_data)) = *slot.borrow() else { return; };
+    RENDER_SURFACE_LAYOUT_CXX_CALLBACK.with(|slot| {
+        let Some((callback, user_data)) = *slot.borrow() else {
+            return;
+        };
         let mut clusters = alloc::vec::Vec::new();
-        let entries = snapshots.iter().map(|snapshot| {
-            let cluster_offset = clusters.len();
-            clusters.extend(snapshot.clusters.iter().map(|cluster| NativeSurfaceLayoutClusterData {
-                start_byte: cluster.start_byte, end_byte: cluster.end_byte, x: cluster.x, width: cluster.width,
-            }));
-            NativeSurfaceLayoutBatchEntryData {
-                layout_key: snapshot.layout_key, baseline: snapshot.baseline, advance: snapshot.advance,
-                cluster_offset, cluster_count: snapshot.clusters.len(),
-            }
-        }).collect::<alloc::vec::Vec<_>>();
-        let payload = NativeSurfaceLayoutBatchData {
-            entries: entries.as_ptr(), entry_count: entries.len(),
-            clusters: clusters.as_ptr(), cluster_count: clusters.len(),
+        let entries = snapshots
+            .iter()
+            .map(|snapshot| {
+                let cluster_offset = clusters.len();
+                clusters.extend(snapshot.clusters.iter().map(|cluster| {
+                    RenderSurfaceLayoutClusterData {
+                        start_byte: cluster.start_byte,
+                        end_byte: cluster.end_byte,
+                        x: cluster.x,
+                        width: cluster.width,
+                    }
+                }));
+                RenderSurfaceLayoutBatchEntryData {
+                    layout_key: snapshot.layout_key,
+                    baseline: snapshot.baseline,
+                    advance: snapshot.advance,
+                    cluster_offset,
+                    cluster_count: snapshot.clusters.len(),
+                }
+            })
+            .collect::<alloc::vec::Vec<_>>();
+        let payload = RenderSurfaceLayoutBatchData {
+            entries: entries.as_ptr(),
+            entry_count: entries.len(),
+            clusters: clusters.as_ptr(),
+            cluster_count: clusters.len(),
         };
         unsafe { callback(surface_id, base_generation, &payload, user_data) };
     });
@@ -138,9 +154,11 @@ fn ffi_string(data: *const u8, len: usize) -> SharedString {
     core::str::from_utf8(bytes).map(SharedString::from).unwrap_or_default()
 }
 
-fn ffi_text_spans(data: *const NativeSurfaceTextSpanData, len: usize, text_len: usize)
-    -> alloc::vec::Vec<i_slint_core::native_surface::NativeSurfaceTextSpan>
-{
+fn ffi_text_spans(
+    data: *const RenderSurfaceTextSpanData,
+    len: usize,
+    text_len: usize,
+) -> alloc::vec::Vec<i_slint_core::render_surface::RenderSurfaceTextSpan> {
     if data.is_null() || len == 0 {
         return Default::default();
     }
@@ -149,139 +167,208 @@ fn ffi_text_spans(data: *const NativeSurfaceTextSpanData, len: usize, text_len: 
         .filter_map(|span| {
             let start = span.start_byte as usize;
             let end = span.end_byte as usize;
-            (start < end && end <= text_len).then_some(i_slint_core::native_surface::NativeSurfaceTextSpan {
-                start_byte: start,
-                end_byte: end,
-                color: Color::from_argb_encoded(span.color_argb),
-            })
+            (start < end && end <= text_len).then_some(
+                i_slint_core::render_surface::RenderSurfaceTextSpan {
+                    start_byte: start,
+                    end_byte: end,
+                    color: Color::from_argb_encoded(span.color_argb),
+                },
+            )
         })
         .collect()
 }
 
-unsafe fn native_surface_commands(
-    commands: *const NativeSurfaceCommandData,
+unsafe fn render_surface_commands(
+    commands: *const RenderSurfaceCommandData,
     command_count: usize,
-) -> alloc::vec::Vec<NativeSurfaceCommand> {
-    let commands = if commands.is_null() || command_count == 0 { &[] }
-        else { unsafe { core::slice::from_raw_parts(commands, command_count) } };
+) -> alloc::vec::Vec<RenderSurfaceCommand> {
+    let commands = if commands.is_null() || command_count == 0 {
+        &[]
+    } else {
+        unsafe { core::slice::from_raw_parts(commands, command_count) }
+    };
     let mut result = alloc::vec::Vec::with_capacity(commands.len());
     for command in commands {
         let color = Color::from_argb_encoded(command.color_argb);
         result.push(match command.kind {
-            0 => NativeSurfaceCommand::FillRect { x: command.x, y: command.y, width: command.width, height: command.height, color },
-            1 => NativeSurfaceCommand::Text {
-                layout_key: command.layout_key,
-                x: command.x, y: command.y, width: command.width, height: command.height,
-                text: ffi_string(command.text, command.text_len), color,
-                spans: ffi_text_spans(command.text_spans, command.text_span_count, command.text_len),
-                font: FontRequest { family: Some(ffi_string(command.font_family, command.font_family_len)),
-                    weight: Some(command.font_weight), pixel_size: Some(LogicalLength::new(command.font_size)), ..Default::default() },
-                horizontal_alignment: match command.horizontal_alignment { 1 => TextHorizontalAlignment::Center, 2 => TextHorizontalAlignment::Right, _ => TextHorizontalAlignment::Left },
-                vertical_alignment: match command.vertical_alignment { 1 => TextVerticalAlignment::Center, 2 => TextVerticalAlignment::Bottom, _ => TextVerticalAlignment::Top },
+            0 => RenderSurfaceCommand::FillRect {
+                x: command.x,
+                y: command.y,
+                width: command.width,
+                height: command.height,
+                color,
             },
-            _ => NativeSurfaceCommand::Line { x: command.x, y: command.y, width: command.width, height: command.height, color },
+            1 => RenderSurfaceCommand::Text {
+                layout_key: command.layout_key,
+                x: command.x,
+                y: command.y,
+                width: command.width,
+                height: command.height,
+                text: ffi_string(command.text, command.text_len),
+                color,
+                spans: ffi_text_spans(
+                    command.text_spans,
+                    command.text_span_count,
+                    command.text_len,
+                ),
+                font: FontRequest {
+                    family: Some(ffi_string(command.font_family, command.font_family_len)),
+                    weight: Some(command.font_weight),
+                    pixel_size: Some(LogicalLength::new(command.font_size)),
+                    ..Default::default()
+                },
+                horizontal_alignment: match command.horizontal_alignment {
+                    1 => TextHorizontalAlignment::Center,
+                    2 => TextHorizontalAlignment::Right,
+                    _ => TextHorizontalAlignment::Left,
+                },
+                vertical_alignment: match command.vertical_alignment {
+                    1 => TextVerticalAlignment::Center,
+                    2 => TextVerticalAlignment::Bottom,
+                    _ => TextVerticalAlignment::Top,
+                },
+            },
+            _ => RenderSurfaceCommand::Line {
+                x: command.x,
+                y: command.y,
+                width: command.width,
+                height: command.height,
+                color,
+            },
         });
     }
     result
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn slint_native_surface_publish(
+pub unsafe extern "C" fn slint_render_surface_publish(
     surface_id: i32,
     generation: u64,
-    commands: *const NativeSurfaceCommandData,
+    commands: *const RenderSurfaceCommandData,
     command_count: usize,
 ) {
-    let frame = NativeSurfaceFrame {
+    let frame = RenderSurfaceFrame {
         generation,
         base_generation: generation,
         underlay_generation: generation,
         overlay_generation: generation,
-        commands: Rc::new(unsafe { native_surface_commands(commands, command_count) }),
+        commands: Rc::new(unsafe { render_surface_commands(commands, command_count) }),
         underlay_commands: Rc::new(Default::default()),
         overlay_commands: Rc::new(Default::default()),
     };
-    publish_native_surface_frame(surface_id, frame);
+    publish_render_surface_frame(surface_id, frame);
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn slint_native_surface_publish_layers(
-    surface_id: i32, generation: u64, base_generation: u64, underlay_generation: u64, overlay_generation: u64,
-    base: *const NativeSurfaceCommandData, base_count: usize,
-    underlay: *const NativeSurfaceCommandData, underlay_count: usize,
-    overlay: *const NativeSurfaceCommandData, overlay_count: usize,
+pub unsafe extern "C" fn slint_render_surface_publish_layers(
+    surface_id: i32,
+    generation: u64,
+    base_generation: u64,
+    underlay_generation: u64,
+    overlay_generation: u64,
+    base: *const RenderSurfaceCommandData,
+    base_count: usize,
+    underlay: *const RenderSurfaceCommandData,
+    underlay_count: usize,
+    overlay: *const RenderSurfaceCommandData,
+    overlay_count: usize,
 ) {
-    publish_native_surface_frame(surface_id, NativeSurfaceFrame {
-        generation, base_generation, underlay_generation, overlay_generation,
-        commands: Rc::new(unsafe { native_surface_commands(base, base_count) }),
-        underlay_commands: Rc::new(unsafe { native_surface_commands(underlay, underlay_count) }),
-        overlay_commands: Rc::new(unsafe { native_surface_commands(overlay, overlay_count) }),
-    });
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn slint_native_surface_publish_layers_delta(
-    surface_id: i32, generation: u64, base_generation: u64, underlay_generation: u64, overlay_generation: u64,
-    changed_layers: u8,
-    base: *const NativeSurfaceCommandData, base_count: usize,
-    underlay: *const NativeSurfaceCommandData, underlay_count: usize,
-    overlay: *const NativeSurfaceCommandData, overlay_count: usize,
-) {
-    let changed = NativeSurfaceLayerMask::from_bits(changed_layers);
-    publish_native_surface_frame_delta(surface_id, generation, base_generation, underlay_generation, overlay_generation,
-        changed,
-        changed.contains(NativeSurfaceLayerMask::BASE)
-            .then(|| Rc::new(unsafe { native_surface_commands(base, base_count) })),
-        changed.contains(NativeSurfaceLayerMask::UNDERLAY)
-            .then(|| Rc::new(unsafe { native_surface_commands(underlay, underlay_count) })),
-        changed.contains(NativeSurfaceLayerMask::OVERLAY)
-            .then(|| Rc::new(unsafe { native_surface_commands(overlay, overlay_count) })),
+    publish_render_surface_frame(
+        surface_id,
+        RenderSurfaceFrame {
+            generation,
+            base_generation,
+            underlay_generation,
+            overlay_generation,
+            commands: Rc::new(unsafe { render_surface_commands(base, base_count) }),
+            underlay_commands: Rc::new(unsafe {
+                render_surface_commands(underlay, underlay_count)
+            }),
+            overlay_commands: Rc::new(unsafe { render_surface_commands(overlay, overlay_count) }),
+        },
     );
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn slint_native_surface_clear(surface_id: i32) {
-    clear_native_surface_frame(surface_id);
+pub unsafe extern "C" fn slint_render_surface_publish_layers_delta(
+    surface_id: i32,
+    generation: u64,
+    base_generation: u64,
+    underlay_generation: u64,
+    overlay_generation: u64,
+    changed_layers: u8,
+    base: *const RenderSurfaceCommandData,
+    base_count: usize,
+    underlay: *const RenderSurfaceCommandData,
+    underlay_count: usize,
+    overlay: *const RenderSurfaceCommandData,
+    overlay_count: usize,
+) {
+    let changed = RenderSurfaceLayerMask::from_bits(changed_layers);
+    publish_render_surface_frame_delta(
+        surface_id,
+        generation,
+        base_generation,
+        underlay_generation,
+        overlay_generation,
+        changed,
+        changed
+            .contains(RenderSurfaceLayerMask::BASE)
+            .then(|| Rc::new(unsafe { render_surface_commands(base, base_count) })),
+        changed
+            .contains(RenderSurfaceLayerMask::UNDERLAY)
+            .then(|| Rc::new(unsafe { render_surface_commands(underlay, underlay_count) })),
+        changed
+            .contains(RenderSurfaceLayerMask::OVERLAY)
+            .then(|| Rc::new(unsafe { render_surface_commands(overlay, overlay_count) })),
+    );
 }
 
-/// Registers a UI-thread callback invoked after a native surface frame has
-/// been drawn by Slint's renderer. This is deliberately a draw-completion
-/// hook rather than a platform-specific swap/vsync promise.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn slint_native_surface_set_rendered_callback(
+pub extern "C" fn slint_render_surface_clear(surface_id: i32) {
+    clear_render_surface_frame(surface_id);
+}
+
+/// Registers a UI-thread callback invoked after a render surface frame has
+/// either reached Slint's renderer or was rejected by clipping. This is a
+/// processing-completion hook rather than a platform swap/vsync promise.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slint_render_surface_set_processed_callback(
     callback: Option<unsafe extern "C" fn(i32, u64, *mut c_void)>,
     user_data: *mut c_void,
 ) {
-    set_native_surface_rendered_callback(callback.map(|callback| NativeSurfaceRenderedCallback {
-        callback,
-        user_data,
-    }));
+    set_render_surface_processed_callback(
+        callback.map(|callback| RenderSurfaceProcessedCallback { callback, user_data }),
+    );
 }
 
 /// Registers a callback immediately before the active backend begins drawing
-/// a native-surface frame. This is a renderer lifecycle marker, not a vsync
+/// a render-surface frame. This is a renderer lifecycle marker, not a vsync
 /// or compositor-presentation notification.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn slint_native_surface_set_draw_started_callback(
+pub unsafe extern "C" fn slint_render_surface_set_draw_started_callback(
     callback: Option<unsafe extern "C" fn(i32, u64, usize, usize, usize, *mut c_void)>,
     user_data: *mut c_void,
 ) {
-    set_native_surface_draw_started_callback(callback.map(|callback| NativeSurfaceDrawStartedCallback {
-        callback, user_data,
-    }));
+    set_render_surface_draw_started_callback(
+        callback.map(|callback| RenderSurfaceDrawStartedCallback { callback, user_data }),
+    );
 }
 
 /// Registers a callback for immutable post-shaping text geometry. Pointers are
 /// valid for the duration of the callback only and the callback runs on the
 /// Slint UI thread.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn slint_native_surface_set_layout_callback(
-    callback: Option<unsafe extern "C" fn(i32, u64, *const NativeSurfaceLayoutBatchData, *mut c_void)>,
+pub unsafe extern "C" fn slint_render_surface_set_layout_callback(
+    callback: Option<
+        unsafe extern "C" fn(i32, u64, *const RenderSurfaceLayoutBatchData, *mut c_void),
+    >,
     user_data: *mut c_void,
 ) {
-    NATIVE_SURFACE_LAYOUT_CXX_CALLBACK.with(|slot| *slot.borrow_mut() = callback.map(|callback| (callback, user_data)));
-    set_native_surface_layout_batch_callback(callback.map(|_| NativeSurfaceLayoutBatchCallback {
-        callback: native_surface_layout_callback_bridge,
+    RENDER_SURFACE_LAYOUT_CXX_CALLBACK
+        .with(|slot| *slot.borrow_mut() = callback.map(|callback| (callback, user_data)));
+    set_render_surface_layout_batch_callback(callback.map(|_| RenderSurfaceLayoutBatchCallback {
+        callback: render_surface_layout_callback_bridge,
         user_data: core::ptr::null_mut(),
     }));
 }

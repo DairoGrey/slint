@@ -10,19 +10,19 @@
 
 namespace slint {
 
-enum class NativeSurfaceHorizontalAlignment : std::uint8_t { Left, Center, Right };
-enum class NativeSurfaceVerticalAlignment : std::uint8_t { Top, Center, Bottom };
-enum class NativeSurfaceLayer : std::uint8_t { Base = 1, Underlay = 2, Overlay = 4 };
+enum class RenderSurfaceHorizontalAlignment : std::uint8_t { Left, Center, Right };
+enum class RenderSurfaceVerticalAlignment : std::uint8_t { Top, Center, Bottom };
+enum class RenderSurfaceLayer : std::uint8_t { Base = 1, Underlay = 2, Overlay = 4 };
 
-constexpr std::uint8_t operator|(NativeSurfaceLayer left, NativeSurfaceLayer right)
+constexpr std::uint8_t operator|(RenderSurfaceLayer left, RenderSurfaceLayer right)
 {
     return static_cast<std::uint8_t>(left) | static_cast<std::uint8_t>(right);
 }
 
-/// A coloured byte range within a UTF-8 NativeSurfaceCommand::Text payload.
+/// A coloured byte range within a UTF-8 RenderSurfaceCommand::Text payload.
 /// Ranges must be ordered, non-overlapping and align with UTF-8 boundaries.
 /// The base command colour remains the fallback outside these ranges.
-struct NativeSurfaceTextSpan {
+struct RenderSurfaceTextSpan {
     std::uint32_t start_byte = 0;
     std::uint32_t end_byte = 0;
     std::uint32_t color_argb = 0;
@@ -30,25 +30,25 @@ struct NativeSurfaceTextSpan {
 
 /// One cluster produced by the renderer's shaping pass. Coordinates are
 /// logical and relative to the corresponding text command's origin.
-struct NativeSurfaceLayoutCluster {
+struct RenderSurfaceLayoutCluster {
     std::uint32_t start_byte = 0;
     std::uint32_t end_byte = 0;
     float x = 0.f;
     float width = 0.f;
 };
 
-/// Immutable layout data delivered during the native-surface render pass.
+/// Immutable layout data delivered during the render-surface render pass.
 /// `clusters` is valid only for the duration of the callback.
-struct NativeSurfaceLayoutSnapshot {
+struct RenderSurfaceLayoutSnapshot {
     std::uint64_t layout_key = 0;
     float baseline = 0.f;
     float advance = 0.f;
-    const NativeSurfaceLayoutCluster *clusters = nullptr;
+    const RenderSurfaceLayoutCluster *clusters = nullptr;
     std::size_t cluster_count = 0;
 };
 
-/// A bounded primitive in a renderer-backed native surface.
-struct NativeSurfaceCommand {
+/// A bounded primitive in a renderer-backed render surface.
+struct RenderSurfaceCommand {
     enum class Kind : std::uint8_t { FillRect, Text, Line };
 
     Kind kind = Kind::FillRect;
@@ -59,19 +59,19 @@ struct NativeSurfaceCommand {
     float height = 0.f;
     std::uint32_t color_argb = 0;
     SharedString text;
-    std::vector<NativeSurfaceTextSpan> text_spans;
+    std::vector<RenderSurfaceTextSpan> text_spans;
     SharedString font_family;
     float font_size = 0.f;
     std::int32_t font_weight = 400;
-    NativeSurfaceHorizontalAlignment horizontal_alignment = NativeSurfaceHorizontalAlignment::Left;
-    NativeSurfaceVerticalAlignment vertical_alignment = NativeSurfaceVerticalAlignment::Top;
+    RenderSurfaceHorizontalAlignment horizontal_alignment = RenderSurfaceHorizontalAlignment::Left;
+    RenderSurfaceVerticalAlignment vertical_alignment = RenderSurfaceVerticalAlignment::Top;
 };
 
 /// Immutable producer-side frame. Publishing copies its commands into Slint's
 /// UI-thread-local registry; callers can immediately reuse or discard it.
-class NativeSurfaceFrame {
+class RenderSurfaceFrame {
 public:
-    explicit NativeSurfaceFrame(std::uint64_t generation = 0) : generation_(generation) { }
+    explicit RenderSurfaceFrame(std::uint64_t generation = 0) : generation_(generation) { }
 
     void set_generation(std::uint64_t generation) { generation_ = generation; }
     [[nodiscard]] std::uint64_t generation() const { return generation_; }
@@ -81,70 +81,70 @@ public:
     [[nodiscard]] std::uint64_t base_generation() const { return base_generation_; }
     [[nodiscard]] std::uint64_t underlay_generation() const { return underlay_generation_; }
     [[nodiscard]] std::uint64_t overlay_generation() const { return overlay_generation_; }
-    [[nodiscard]] std::vector<NativeSurfaceCommand> &commands() { return commands_; }
-    [[nodiscard]] const std::vector<NativeSurfaceCommand> &commands() const { return commands_; }
-    [[nodiscard]] std::vector<NativeSurfaceCommand> &underlay_commands() { return underlay_commands_; }
-    [[nodiscard]] const std::vector<NativeSurfaceCommand> &underlay_commands() const { return underlay_commands_; }
-    [[nodiscard]] std::vector<NativeSurfaceCommand> &overlay_commands() { return overlay_commands_; }
-    [[nodiscard]] const std::vector<NativeSurfaceCommand> &overlay_commands() const { return overlay_commands_; }
+    [[nodiscard]] std::vector<RenderSurfaceCommand> &commands() { return commands_; }
+    [[nodiscard]] const std::vector<RenderSurfaceCommand> &commands() const { return commands_; }
+    [[nodiscard]] std::vector<RenderSurfaceCommand> &underlay_commands() { return underlay_commands_; }
+    [[nodiscard]] const std::vector<RenderSurfaceCommand> &underlay_commands() const { return underlay_commands_; }
+    [[nodiscard]] std::vector<RenderSurfaceCommand> &overlay_commands() { return overlay_commands_; }
+    [[nodiscard]] const std::vector<RenderSurfaceCommand> &overlay_commands() const { return overlay_commands_; }
 
 private:
     std::uint64_t generation_ = 0;
     std::uint64_t base_generation_ = 0;
     std::uint64_t underlay_generation_ = 0;
     std::uint64_t overlay_generation_ = 0;
-    std::vector<NativeSurfaceCommand> commands_;
-    std::vector<NativeSurfaceCommand> underlay_commands_;
-    std::vector<NativeSurfaceCommand> overlay_commands_;
-    friend class NativeSurfaceRegistry;
+    std::vector<RenderSurfaceCommand> commands_;
+    std::vector<RenderSurfaceCommand> underlay_commands_;
+    std::vector<RenderSurfaceCommand> overlay_commands_;
+    friend class RenderSurfaceRegistry;
 };
 
-/// Public bridge between a C++ host and `NativeSurfaceItem`.
+/// Public bridge between a C++ host and `RenderSurfaceItem`.
 ///
 /// Publish on Slint's event-loop thread. The registry deliberately carries no
 /// renderer objects and is usable by generated Slint components only through
 /// their integer `surface-id` property.
-class NativeSurfaceRegistry {
+class RenderSurfaceRegistry {
 public:
-    using rendered_callback = void (*)(std::int32_t surface_id, std::uint64_t generation, void* user_data);
+    using processed_callback = void (*)(std::int32_t surface_id, std::uint64_t generation, void* user_data);
     using draw_started_callback = void (*)(std::int32_t surface_id, std::uint64_t generation,
                                            std::size_t base_commands, std::size_t underlay_commands,
                                            std::size_t overlay_commands, void* user_data);
     using layout_callback = void (*)(std::int32_t surface_id, std::uint64_t base_generation,
-                                     const NativeSurfaceLayoutSnapshot&, void* user_data);
+                                     const RenderSurfaceLayoutSnapshot&, void* user_data);
 
-    /// Receives a UI-thread notification when the backend has completed the
-    /// native-surface draw pass. This does not claim OS-compositor/vsync
-    /// completion, which is intentionally outside this portable API.
-    static void set_rendered_callback(rendered_callback callback, void* user_data = nullptr)
+    /// Receives a UI-thread notification when the backend has processed the
+    /// frame. Fully clipped frames complete through this callback as well. It
+    /// does not claim OS-compositor/vsync completion.
+    static void set_processed_callback(processed_callback callback, void* user_data = nullptr)
     {
-        cbindgen_private::slint_native_surface_set_rendered_callback(callback, user_data);
+        cbindgen_private::slint_render_surface_set_processed_callback(callback, user_data);
     }
 
     /// Receives a UI-thread marker immediately before the renderer starts a
-    /// native-surface frame. Pair it with set_rendered_callback() to measure
+    /// render-surface frame. Pair it with set_processed_callback() to measure
     /// renderer work independently from event-loop wakeup latency.
     static void set_draw_started_callback(draw_started_callback callback, void* user_data = nullptr)
     {
-        cbindgen_private::slint_native_surface_set_draw_started_callback(callback, user_data);
+        cbindgen_private::slint_render_surface_set_draw_started_callback(callback, user_data);
     }
 
     /// Receives cluster geometry produced by the same backend shaping pass
-    /// that draws a NativeSurfaceCommand::Text. The callback runs on the UI
+    /// that draws a RenderSurfaceCommand::Text. The callback runs on the UI
     /// thread and must copy data it needs after return.
     static void set_layout_callback(layout_callback callback, void* user_data = nullptr)
     {
         layout_callback_ = callback;
         layout_user_data_ = user_data;
-        cbindgen_private::slint_native_surface_set_layout_callback(
-            callback ? &NativeSurfaceRegistry::layout_callback_adapter : nullptr, nullptr);
+        cbindgen_private::slint_render_surface_set_layout_callback(
+            callback ? &RenderSurfaceRegistry::layout_callback_adapter : nullptr, nullptr);
     }
 
-    static void publish(std::int32_t surface_id, const NativeSurfaceFrame &frame)
+    static void publish(std::int32_t surface_id, const RenderSurfaceFrame &frame)
     {
-        const auto encode = [](const std::vector<NativeSurfaceCommand>& source,
-                               std::vector<cbindgen_private::NativeSurfaceCommandData>& commands,
-                               std::vector<cbindgen_private::NativeSurfaceTextSpanData>& spans) {
+        const auto encode = [](const std::vector<RenderSurfaceCommand>& source,
+                               std::vector<cbindgen_private::RenderSurfaceCommandData>& commands,
+                               std::vector<cbindgen_private::RenderSurfaceTextSpanData>& spans) {
             std::size_t span_count = 0;
             for (const auto &command : source) span_count += command.text_spans.size();
             spans.reserve(span_count);
@@ -179,16 +179,16 @@ public:
             });
             }
         };
-        std::vector<cbindgen_private::NativeSurfaceCommandData> commands;
-        std::vector<cbindgen_private::NativeSurfaceTextSpanData> spans;
-        std::vector<cbindgen_private::NativeSurfaceCommandData> overlay_commands;
-        std::vector<cbindgen_private::NativeSurfaceTextSpanData> overlay_spans;
-        std::vector<cbindgen_private::NativeSurfaceCommandData> underlay_commands;
-        std::vector<cbindgen_private::NativeSurfaceTextSpanData> underlay_spans;
+        std::vector<cbindgen_private::RenderSurfaceCommandData> commands;
+        std::vector<cbindgen_private::RenderSurfaceTextSpanData> spans;
+        std::vector<cbindgen_private::RenderSurfaceCommandData> overlay_commands;
+        std::vector<cbindgen_private::RenderSurfaceTextSpanData> overlay_spans;
+        std::vector<cbindgen_private::RenderSurfaceCommandData> underlay_commands;
+        std::vector<cbindgen_private::RenderSurfaceTextSpanData> underlay_spans;
         encode(frame.commands_, commands, spans);
         encode(frame.underlay_commands_, underlay_commands, underlay_spans);
         encode(frame.overlay_commands_, overlay_commands, overlay_spans);
-        cbindgen_private::slint_native_surface_publish_layers(
+        cbindgen_private::slint_render_surface_publish_layers(
                 surface_id, frame.generation_, frame.base_generation_, frame.underlay_generation_, frame.overlay_generation_,
                 commands.data(), commands.size(), underlay_commands.data(), underlay_commands.size(),
                 overlay_commands.data(), overlay_commands.size());
@@ -196,11 +196,11 @@ public:
 
     /// Replaces only selected layers. A selected empty vector clears that
     /// layer; all omitted layers retain their registered immutable commands.
-    static void publish_delta(std::int32_t surface_id, const NativeSurfaceFrame &frame, std::uint8_t changed_layers)
+    static void publish_delta(std::int32_t surface_id, const RenderSurfaceFrame &frame, std::uint8_t changed_layers)
     {
-        const auto encode = [](const std::vector<NativeSurfaceCommand>& source,
-                               std::vector<cbindgen_private::NativeSurfaceCommandData>& commands,
-                               std::vector<cbindgen_private::NativeSurfaceTextSpanData>& spans) {
+        const auto encode = [](const std::vector<RenderSurfaceCommand>& source,
+                               std::vector<cbindgen_private::RenderSurfaceCommandData>& commands,
+                               std::vector<cbindgen_private::RenderSurfaceTextSpanData>& spans) {
             std::size_t span_count = 0;
             for (const auto &command : source) span_count += command.text_spans.size();
             spans.reserve(span_count);
@@ -224,26 +224,26 @@ public:
                 });
             }
         };
-        std::vector<cbindgen_private::NativeSurfaceCommandData> base, underlay, overlay;
-        std::vector<cbindgen_private::NativeSurfaceTextSpanData> base_spans, underlay_spans, overlay_spans;
-        if (changed_layers & static_cast<std::uint8_t>(NativeSurfaceLayer::Base)) encode(frame.commands_, base, base_spans);
-        if (changed_layers & static_cast<std::uint8_t>(NativeSurfaceLayer::Underlay)) encode(frame.underlay_commands_, underlay, underlay_spans);
-        if (changed_layers & static_cast<std::uint8_t>(NativeSurfaceLayer::Overlay)) encode(frame.overlay_commands_, overlay, overlay_spans);
-        cbindgen_private::slint_native_surface_publish_layers_delta(
+        std::vector<cbindgen_private::RenderSurfaceCommandData> base, underlay, overlay;
+        std::vector<cbindgen_private::RenderSurfaceTextSpanData> base_spans, underlay_spans, overlay_spans;
+        if (changed_layers & static_cast<std::uint8_t>(RenderSurfaceLayer::Base)) encode(frame.commands_, base, base_spans);
+        if (changed_layers & static_cast<std::uint8_t>(RenderSurfaceLayer::Underlay)) encode(frame.underlay_commands_, underlay, underlay_spans);
+        if (changed_layers & static_cast<std::uint8_t>(RenderSurfaceLayer::Overlay)) encode(frame.overlay_commands_, overlay, overlay_spans);
+        cbindgen_private::slint_render_surface_publish_layers_delta(
             surface_id, frame.generation_, frame.base_generation_, frame.underlay_generation_, frame.overlay_generation_, changed_layers,
             base.data(), base.size(), underlay.data(), underlay.size(), overlay.data(), overlay.size());
     }
 
     static void clear(std::int32_t surface_id)
     {
-        cbindgen_private::slint_native_surface_clear(surface_id);
+        cbindgen_private::slint_render_surface_clear(surface_id);
     }
 
 private:
     static void layout_callback_adapter(
         std::int32_t surface_id,
         std::uint64_t base_generation,
-        const cbindgen_private::NativeSurfaceLayoutBatchData* source,
+        const cbindgen_private::RenderSurfaceLayoutBatchData* source,
         void*)
     {
         if (!layout_callback_ || !source || !source->entries) return;
@@ -251,11 +251,11 @@ private:
             const auto& entry = source->entries[index];
             if (entry.cluster_offset > source->cluster_count
                 || entry.cluster_count > source->cluster_count - entry.cluster_offset) continue;
-            const NativeSurfaceLayoutSnapshot snapshot {
+            const RenderSurfaceLayoutSnapshot snapshot {
                 .layout_key = entry.layout_key,
                 .baseline = entry.baseline,
                 .advance = entry.advance,
-                .clusters = reinterpret_cast<const NativeSurfaceLayoutCluster*>(source->clusters + entry.cluster_offset),
+                .clusters = reinterpret_cast<const RenderSurfaceLayoutCluster*>(source->clusters + entry.cluster_offset),
                 .cluster_count = entry.cluster_count,
             };
             layout_callback_(surface_id, base_generation, snapshot, layout_user_data_);
