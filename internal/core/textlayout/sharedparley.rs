@@ -307,13 +307,34 @@ fn render_surface_layout_snapshot(
         }
     }
     for &byte_offset in requested_stops {
-        let cursor = layout.cursor_rect_for_byte_offset(
-            byte_offset as usize,
-            PhysicalLength::new(1.0),
-        );
+        let offset = byte_offset as usize;
+        // Styled paragraphs currently carry an empty outer `TextParagraph`
+        // range even though their Parley layout has the complete local byte
+        // range. `Layout::cursor_rect_for_byte_offset()` consequently clamps
+        // every styled offset to zero. Resolve against Parley's actual line
+        // text ranges here; these are the same shaped layouts used for draw.
+        let mut paragraph_start = 0usize;
+        let mut cursor_x = 0.0;
+        for (paragraph_index, paragraph) in layout.paragraphs.iter().enumerate() {
+            let paragraph_len =
+                paragraph.layout.lines().last().map(|line| line.text_range().end).unwrap_or(0);
+            let is_last = paragraph_index + 1 == layout.paragraphs.len();
+            if offset <= paragraph_start + paragraph_len || is_last {
+                let local_offset = offset.saturating_sub(paragraph_start).min(paragraph_len);
+                let cursor = parley::editing::Cursor::from_byte_index(
+                    &paragraph.layout,
+                    local_offset,
+                    Default::default(),
+                );
+                cursor_x = cursor.geometry(&paragraph.layout, 1.0).x0 as f32;
+                break;
+            }
+            // Paragraph text excludes the separating newline.
+            paragraph_start += paragraph_len + 1;
+        }
         snapshot.stops.push(crate::render_surface::RenderSurfaceLayoutStop {
             byte_offset,
-            x: cursor.origin.x / scale,
+            x: cursor_x / scale,
         });
     }
     snapshot
@@ -417,7 +438,10 @@ pub fn draw_render_surface<R: GlyphRenderer>(
                 horizontal_alignment,
                 vertical_alignment,
             } => {
-                if text.is_empty() || !intersects_surface(*x, *y, *width, *height) {
+                // Empty editor lines still carry a layout key and a requested
+                // byte-zero caret stop. Parley can shape the empty paragraph;
+                // skipping it would make the line impossible to hit-test.
+                if !intersects_surface(*x, *y, *width, *height) {
                     continue;
                 }
                 renderer.save_state();
