@@ -15,7 +15,8 @@ use i_slint_core::SharedString;
 use i_slint_core::graphics::{Color, FontRequest};
 use i_slint_core::lengths::LogicalLength;
 use i_slint_core::native_surface::{
-    NativeSurfaceCommand, NativeSurfaceFrame, clear_native_surface_frame, publish_native_surface_frame,
+    NativeSurfaceCommand, NativeSurfaceFrame, NativeSurfaceLayerMask, clear_native_surface_frame,
+    publish_native_surface_frame, publish_native_surface_frame_delta,
 };
 use i_slint_core::items::OperatingSystemType;
 use i_slint_core::items::{TextHorizontalAlignment, TextVerticalAlignment};
@@ -118,9 +119,9 @@ pub unsafe extern "C" fn slint_native_surface_publish(
         base_generation: generation,
         underlay_generation: generation,
         overlay_generation: generation,
-        commands: unsafe { native_surface_commands(commands, command_count) },
-        underlay_commands: Default::default(),
-        overlay_commands: Default::default(),
+        commands: Rc::new(unsafe { native_surface_commands(commands, command_count) }),
+        underlay_commands: Rc::new(Default::default()),
+        overlay_commands: Rc::new(Default::default()),
     };
     publish_native_surface_frame(surface_id, frame);
 }
@@ -134,10 +135,30 @@ pub unsafe extern "C" fn slint_native_surface_publish_layers(
 ) {
     publish_native_surface_frame(surface_id, NativeSurfaceFrame {
         generation, base_generation, underlay_generation, overlay_generation,
-        commands: unsafe { native_surface_commands(base, base_count) },
-        underlay_commands: unsafe { native_surface_commands(underlay, underlay_count) },
-        overlay_commands: unsafe { native_surface_commands(overlay, overlay_count) },
+        commands: Rc::new(unsafe { native_surface_commands(base, base_count) }),
+        underlay_commands: Rc::new(unsafe { native_surface_commands(underlay, underlay_count) }),
+        overlay_commands: Rc::new(unsafe { native_surface_commands(overlay, overlay_count) }),
     });
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slint_native_surface_publish_layers_delta(
+    surface_id: i32, generation: u64, base_generation: u64, underlay_generation: u64, overlay_generation: u64,
+    changed_layers: u8,
+    base: *const NativeSurfaceCommandData, base_count: usize,
+    underlay: *const NativeSurfaceCommandData, underlay_count: usize,
+    overlay: *const NativeSurfaceCommandData, overlay_count: usize,
+) {
+    let changed = NativeSurfaceLayerMask::from_bits(changed_layers);
+    publish_native_surface_frame_delta(surface_id, generation, base_generation, underlay_generation, overlay_generation,
+        changed,
+        changed.contains(NativeSurfaceLayerMask::BASE)
+            .then(|| Rc::new(unsafe { native_surface_commands(base, base_count) })),
+        changed.contains(NativeSurfaceLayerMask::UNDERLAY)
+            .then(|| Rc::new(unsafe { native_surface_commands(underlay, underlay_count) })),
+        changed.contains(NativeSurfaceLayerMask::OVERLAY)
+            .then(|| Rc::new(unsafe { native_surface_commands(overlay, overlay_count) })),
+    );
 }
 
 #[unsafe(no_mangle)]

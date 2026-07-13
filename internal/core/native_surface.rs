@@ -32,11 +32,35 @@ pub struct NativeSurfaceFrame {
     /// Generation of transient overlay commands.
     pub overlay_generation: u64,
     /// Commands are positioned in the local coordinate system of the item.
-    pub commands: Vec<NativeSurfaceCommand>,
-    pub underlay_commands: Vec<NativeSurfaceCommand>,
+    pub commands: Rc<Vec<NativeSurfaceCommand>>,
+    pub underlay_commands: Rc<Vec<NativeSurfaceCommand>>,
     /// Commands drawn after `commands`, for carets, selection and other
     /// transient overlays.
-    pub overlay_commands: Vec<NativeSurfaceCommand>,
+    pub overlay_commands: Rc<Vec<NativeSurfaceCommand>>,
+}
+
+/// A set of independently replaceable native-surface display-list layers.
+///
+/// A delta deliberately distinguishes an omitted layer from an explicitly
+/// empty one: omitted layers retain their existing immutable list, while an
+/// included empty layer clears that list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeSurfaceLayerMask(u8);
+
+impl NativeSurfaceLayerMask {
+    pub const BASE: Self = Self(1);
+    pub const UNDERLAY: Self = Self(2);
+    pub const OVERLAY: Self = Self(4);
+    pub const ALL: Self = Self(Self::BASE.0 | Self::UNDERLAY.0 | Self::OVERLAY.0);
+
+    pub const fn from_bits(bits: u8) -> Self { Self(bits & Self::ALL.0) }
+    pub const fn contains(self, layer: Self) -> bool { self.0 & layer.0 != 0 }
+}
+
+impl core::ops::BitOr for NativeSurfaceLayerMask {
+    type Output = Self;
+
+    fn bitor(self, right: Self) -> Self::Output { Self::from_bits(self.0 | right.0) }
 }
 
 /// A primitive command accepted by native-surface renderers.
@@ -82,6 +106,48 @@ thread_local! {
 pub fn publish_native_surface_frame(surface_id: i32, frame: NativeSurfaceFrame) {
     SURFACES.with(|surfaces| {
         surfaces.borrow_mut().insert(surface_id, Rc::new(frame));
+    });
+}
+
+/// Replaces only the layers selected by `changed` while retaining the exact
+/// immutable allocations for all omitted layers.
+pub fn publish_native_surface_frame_delta(
+    surface_id: i32,
+    generation: u64,
+    base_generation: u64,
+    underlay_generation: u64,
+    overlay_generation: u64,
+    changed: NativeSurfaceLayerMask,
+    base: Option<Rc<Vec<NativeSurfaceCommand>>>,
+    underlay: Option<Rc<Vec<NativeSurfaceCommand>>>,
+    overlay: Option<Rc<Vec<NativeSurfaceCommand>>>,
+) {
+    SURFACES.with(|surfaces| {
+        let mut surfaces = surfaces.borrow_mut();
+        let previous = surfaces.get(&surface_id);
+        let empty = || Rc::new(Vec::new());
+        let frame = NativeSurfaceFrame {
+            generation,
+            base_generation: if changed.contains(NativeSurfaceLayerMask::BASE) {
+                base_generation
+            } else { previous.map_or(0, |frame| frame.base_generation) },
+            underlay_generation: if changed.contains(NativeSurfaceLayerMask::UNDERLAY) {
+                underlay_generation
+            } else { previous.map_or(0, |frame| frame.underlay_generation) },
+            overlay_generation: if changed.contains(NativeSurfaceLayerMask::OVERLAY) {
+                overlay_generation
+            } else { previous.map_or(0, |frame| frame.overlay_generation) },
+            commands: if changed.contains(NativeSurfaceLayerMask::BASE) {
+                base.unwrap_or_else(empty)
+            } else { previous.map_or_else(empty, |frame| frame.commands.clone()) },
+            underlay_commands: if changed.contains(NativeSurfaceLayerMask::UNDERLAY) {
+                underlay.unwrap_or_else(empty)
+            } else { previous.map_or_else(empty, |frame| frame.underlay_commands.clone()) },
+            overlay_commands: if changed.contains(NativeSurfaceLayerMask::OVERLAY) {
+                overlay.unwrap_or_else(empty)
+            } else { previous.map_or_else(empty, |frame| frame.overlay_commands.clone()) },
+        };
+        surfaces.insert(surface_id, Rc::new(frame));
     });
 }
 
@@ -160,22 +226,42 @@ mod tests {
             base_generation: 1,
             underlay_generation: 1,
             overlay_generation: 1,
-            commands: alloc::vec![NativeSurfaceCommand::FillRect {
+            commands: Rc::new(alloc::vec![NativeSurfaceCommand::FillRect {
                 x: 1., y: 2., width: 3., height: 4., color: Color::from_rgb_u8(1, 2, 3),
-            }],
-            underlay_commands: Default::default(),
-            overlay_commands: Default::default(),
+            }]),
+            underlay_commands: Rc::new(Default::default()),
+            overlay_commands: Rc::new(Default::default()),
         });
         let first = native_surface_frame(17).unwrap();
         assert_eq!(first.generation, 1);
         publish_native_surface_frame(17, NativeSurfaceFrame {
             generation: 2, base_generation: 2, underlay_generation: 2, overlay_generation: 2,
-            commands: Default::default(), underlay_commands: Default::default(), overlay_commands: Default::default(),
+            commands: Rc::new(Default::default()), underlay_commands: Rc::new(Default::default()), overlay_commands: Rc::new(Default::default()),
         });
         assert_eq!(first.generation, 1);
         assert_eq!(native_surface_frame(17).unwrap().generation, 2);
         clear_native_surface_frame(17);
         assert!(native_surface_frame(17).is_none());
+    }
+
+    #[test]
+    fn registry_delta_preserves_omitted_layers_and_clears_included_empty_layer() {
+        let base = Rc::new(alloc::vec![NativeSurfaceCommand::FillRect {
+            x: 0., y: 0., width: 1., height: 1., color: Color::default(),
+        }]);
+        publish_native_surface_frame(18, NativeSurfaceFrame {
+            generation: 1, base_generation: 10, underlay_generation: 20, overlay_generation: 30,
+            commands: base.clone(), underlay_commands: Rc::new(Default::default()), overlay_commands: Rc::new(Default::default()),
+        });
+        publish_native_surface_frame_delta(18, 2, 11, 21, 31,
+            NativeSurfaceLayerMask::UNDERLAY | NativeSurfaceLayerMask::OVERLAY,
+            None, Some(Rc::new(Default::default())), Some(Rc::new(Default::default())));
+        let frame = native_surface_frame(18).unwrap();
+        assert_eq!(frame.generation, 2);
+        assert_eq!(frame.base_generation, 10);
+        assert!(Rc::ptr_eq(&frame.commands, &base));
+        assert!(frame.underlay_commands.is_empty());
+        assert!(frame.overlay_commands.is_empty());
     }
 
     #[test]

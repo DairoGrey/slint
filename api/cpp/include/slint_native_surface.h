@@ -12,6 +12,12 @@ namespace slint {
 
 enum class NativeSurfaceHorizontalAlignment : std::uint8_t { Left, Center, Right };
 enum class NativeSurfaceVerticalAlignment : std::uint8_t { Top, Center, Bottom };
+enum class NativeSurfaceLayer : std::uint8_t { Base = 1, Underlay = 2, Overlay = 4 };
+
+constexpr std::uint8_t operator|(NativeSurfaceLayer left, NativeSurfaceLayer right)
+{
+    return static_cast<std::uint8_t>(left) | static_cast<std::uint8_t>(right);
+}
 
 /// A coloured byte range within a UTF-8 NativeSurfaceCommand::Text payload.
 /// Ranges must be ordered, non-overlapping and align with UTF-8 boundaries.
@@ -131,6 +137,46 @@ public:
                 surface_id, frame.generation_, frame.base_generation_, frame.underlay_generation_, frame.overlay_generation_,
                 commands.data(), commands.size(), underlay_commands.data(), underlay_commands.size(),
                 overlay_commands.data(), overlay_commands.size());
+    }
+
+    /// Replaces only selected layers. A selected empty vector clears that
+    /// layer; all omitted layers retain their registered immutable commands.
+    static void publish_delta(std::int32_t surface_id, const NativeSurfaceFrame &frame, std::uint8_t changed_layers)
+    {
+        const auto encode = [](const std::vector<NativeSurfaceCommand>& source,
+                               std::vector<cbindgen_private::NativeSurfaceCommandData>& commands,
+                               std::vector<cbindgen_private::NativeSurfaceTextSpanData>& spans) {
+            std::size_t span_count = 0;
+            for (const auto &command : source) span_count += command.text_spans.size();
+            spans.reserve(span_count);
+            commands.reserve(source.size());
+            for (const auto &command : source) {
+                const auto first_span = spans.size();
+                for (const auto &span : command.text_spans) {
+                    spans.push_back({ .start_byte = span.start_byte, .end_byte = span.end_byte, .color_argb = span.color_argb });
+                }
+                commands.push_back({
+                    .kind = static_cast<std::uint8_t>(command.kind), .x = command.x, .y = command.y,
+                    .width = command.width, .height = command.height, .color_argb = command.color_argb,
+                    .text = reinterpret_cast<const std::uint8_t *>(command.text.data()), .text_len = command.text.size(),
+                    .text_spans = command.text_spans.empty() ? nullptr : spans.data() + first_span,
+                    .text_span_count = command.text_spans.size(),
+                    .font_family = reinterpret_cast<const std::uint8_t *>(command.font_family.data()),
+                    .font_family_len = command.font_family.size(), .font_size = command.font_size,
+                    .font_weight = command.font_weight,
+                    .horizontal_alignment = static_cast<std::uint8_t>(command.horizontal_alignment),
+                    .vertical_alignment = static_cast<std::uint8_t>(command.vertical_alignment),
+                });
+            }
+        };
+        std::vector<cbindgen_private::NativeSurfaceCommandData> base, underlay, overlay;
+        std::vector<cbindgen_private::NativeSurfaceTextSpanData> base_spans, underlay_spans, overlay_spans;
+        if (changed_layers & static_cast<std::uint8_t>(NativeSurfaceLayer::Base)) encode(frame.commands_, base, base_spans);
+        if (changed_layers & static_cast<std::uint8_t>(NativeSurfaceLayer::Underlay)) encode(frame.underlay_commands_, underlay, underlay_spans);
+        if (changed_layers & static_cast<std::uint8_t>(NativeSurfaceLayer::Overlay)) encode(frame.overlay_commands_, overlay, overlay_spans);
+        cbindgen_private::slint_native_surface_publish_layers_delta(
+            surface_id, frame.generation_, frame.base_generation_, frame.underlay_generation_, frame.overlay_generation_, changed_layers,
+            base.data(), base.size(), underlay.data(), underlay.size(), overlay.data(), overlay.size());
     }
 
     static void clear(std::int32_t surface_id)
