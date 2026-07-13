@@ -1691,13 +1691,33 @@ fn render_surface_layout_snapshot(
     }
     for &byte_offset in requested_stops {
         let offset = byte_offset as usize;
-        let cursor = layout.cursor_rect_for_byte_offset(
-            offset,
-            PhysicalLength::new(1.0),
-        );
+        // Styled paragraphs currently carry an empty outer `TextParagraph`
+        // range even though their Parley layout has the complete local byte
+        // range. `Layout::cursor_rect_for_byte_offset()` consequently clamps
+        // every styled offset to zero. Resolve against Parley's actual line
+        // text ranges here; these are the same shaped layouts used for draw.
+        let mut paragraph_start = 0usize;
+        let mut cursor_x = 0.0;
+        for (paragraph_index, paragraph) in layout.paragraphs.iter().enumerate() {
+            let paragraph_len =
+                paragraph.layout.lines().last().map(|line| line.text_range().end).unwrap_or(0);
+            let is_last = paragraph_index + 1 == layout.paragraphs.len();
+            if offset <= paragraph_start + paragraph_len || is_last {
+                let local_offset = offset.saturating_sub(paragraph_start).min(paragraph_len);
+                let cursor = parley::editing::Cursor::from_byte_index(
+                    &paragraph.layout,
+                    local_offset,
+                    Default::default(),
+                );
+                cursor_x = cursor.geometry(&paragraph.layout, 1.0).x0 as f32;
+                break;
+            }
+            // Paragraph text excludes the separating newline.
+            paragraph_start += paragraph_len + 1;
+        }
         snapshot.stops.push(crate::render_surface::RenderSurfaceLayoutStop {
             byte_offset,
-            x: cursor.origin.x / scale,
+            x: cursor_x / scale,
         });
     }
     snapshot
@@ -1801,7 +1821,10 @@ pub fn draw_render_surface<R: GlyphRenderer>(
                 horizontal_alignment,
                 vertical_alignment,
             } => {
-                if text.is_empty() || !intersects_surface(*x, *y, *width, *height) {
+                // Empty editor lines still carry a layout key and a requested
+                // byte-zero caret stop. Parley can shape the empty paragraph;
+                // skipping it would make the line impossible to hit-test.
+                if !intersects_surface(*x, *y, *width, *height) {
                     continue;
                 }
                 renderer.save_state();
@@ -2306,7 +2329,7 @@ mod tests {
         paragraph_ranges(text).map(|r| &text[r]).collect()
     }
 
-    fn layout_text_with_options(text: &str, options: LayoutOptions) -> Layout {
+    fn layout_source_with_options(text: PlainOrStyledText, options: LayoutOptions) -> Layout {
         // Don't load system fonts: that goes through fontconfig FFI, which Miri
         // can't execute. Use the bundled Inter font instead.
         let mut font_ctx = parley::FontContext {
@@ -2329,14 +2352,17 @@ mod tests {
             None,
             ScaleFactor::new(1.0),
         );
-        let paragraphs = create_text_paragraphs(
-            &builder,
-            &mut font_ctx,
-            PlainOrStyledText::Plain(text.into()),
-            None,
-            Color::default(),
-        );
+        let paragraphs =
+            create_text_paragraphs(&builder, &mut font_ctx, text, None, Color::default());
         layout(&builder, &mut font_ctx, paragraphs, ScaleFactor::new(1.0), options)
+    }
+
+    fn layout_source(text: PlainOrStyledText) -> Layout {
+        layout_source_with_options(text, LayoutOptions::default())
+    }
+
+    fn layout_text_with_options(text: &str, options: LayoutOptions) -> Layout {
+        layout_source_with_options(PlainOrStyledText::Plain(text.into()), options)
     }
 
     fn layout_text(text: &str) -> Layout {
@@ -2374,27 +2400,50 @@ mod tests {
         let text = "a🙂fi";
         let layout = layout_text(text);
         let requested = [0, 1, 5, 6, text.len() as u32];
-        let snapshot = render_surface_layout_snapshot(
-            17,
-            &layout,
-            ScaleFactor::new(1.0),
-            &requested,
-        );
+        let snapshot =
+            render_surface_layout_snapshot(17, &layout, ScaleFactor::new(1.0), &requested);
 
         assert_eq!(snapshot.layout_key, 17);
         assert_eq!(snapshot.stops.len(), requested.len());
         for (stop, requested_offset) in snapshot.stops.iter().zip(requested) {
             assert_eq!(stop.byte_offset, requested_offset);
             let expected = layout
-                .cursor_rect_for_byte_offset(
-                    requested_offset as usize,
-                    PhysicalLength::new(1.0),
-                )
+                .cursor_rect_for_byte_offset(requested_offset as usize, PhysicalLength::new(1.0))
                 .origin
                 .x;
             assert_eq!(stop.x, expected);
         }
         assert!(snapshot.stops.windows(2).all(|pair| pair[0].x <= pair[1].x));
+        assert!(snapshot.stops.last().unwrap().x > snapshot.stops.first().unwrap().x);
+    }
+
+    #[test]
+    fn render_surface_styled_layout_stops_do_not_collapse_to_zero() {
+        let text = crate::SharedString::from("styled caret positions");
+        let styled = crate::styled_text::from_colored_spans(
+            text.clone(),
+            [(0..6, Color::from_rgb_u8(255, 0, 0).as_argb_encoded())].into_iter(),
+        );
+        let layout = layout_source(PlainOrStyledText::Styled(styled));
+        let snapshot = render_surface_layout_snapshot(
+            19,
+            &layout,
+            ScaleFactor::new(1.0),
+            &[0, 6, text.len() as u32],
+        );
+        assert_eq!(snapshot.stops.len(), 3);
+        assert_eq!(snapshot.stops[0].x, 0.0);
+        assert!(snapshot.stops[1].x > snapshot.stops[0].x);
+        assert!(snapshot.stops[2].x > snapshot.stops[1].x);
+    }
+
+    #[test]
+    fn render_surface_empty_text_has_byte_zero_caret_stop() {
+        let layout = layout_text("");
+        let snapshot = render_surface_layout_snapshot(23, &layout, ScaleFactor::new(1.0), &[0]);
+        assert_eq!(snapshot.stops.len(), 1);
+        assert_eq!(snapshot.stops[0].byte_offset, 0);
+        assert_eq!(snapshot.stops[0].x, 0.0);
     }
 
     #[test]
