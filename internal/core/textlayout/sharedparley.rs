@@ -1680,6 +1680,7 @@ pub fn draw_native_surface<R: GlyphRenderer>(
         }
     }
     renderer.restore_state();
+    crate::native_surface::notify_native_surface_rendered(surface.surface_id(), frame.generation);
 }
 
 #[cfg(feature = "std")]

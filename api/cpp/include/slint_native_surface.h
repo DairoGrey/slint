@@ -86,6 +86,16 @@ private:
 /// their integer `surface-id` property.
 class NativeSurfaceRegistry {
 public:
+    using rendered_callback = void (*)(std::int32_t surface_id, std::uint64_t generation, void* user_data);
+
+    /// Receives a UI-thread notification when the backend has completed the
+    /// native-surface draw pass. This does not claim OS-compositor/vsync
+    /// completion, which is intentionally outside this portable API.
+    static void set_rendered_callback(rendered_callback callback, void* user_data = nullptr)
+    {
+        cbindgen_private::slint_native_surface_set_rendered_callback(callback, user_data);
+    }
+
     static void publish(std::int32_t surface_id, const NativeSurfaceFrame &frame)
     {
         const auto encode = [](const std::vector<NativeSurfaceCommand>& source,

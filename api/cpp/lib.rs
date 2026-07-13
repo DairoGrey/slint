@@ -17,6 +17,7 @@ use i_slint_core::lengths::LogicalLength;
 use i_slint_core::native_surface::{
     NativeSurfaceCommand, NativeSurfaceFrame, NativeSurfaceLayerMask, clear_native_surface_frame,
     publish_native_surface_frame, publish_native_surface_frame_delta,
+    NativeSurfaceRenderedCallback, set_native_surface_rendered_callback,
 };
 use i_slint_core::items::OperatingSystemType;
 use i_slint_core::items::{TextHorizontalAlignment, TextVerticalAlignment};
@@ -164,6 +165,20 @@ pub unsafe extern "C" fn slint_native_surface_publish_layers_delta(
 #[unsafe(no_mangle)]
 pub extern "C" fn slint_native_surface_clear(surface_id: i32) {
     clear_native_surface_frame(surface_id);
+}
+
+/// Registers a UI-thread callback invoked after a native surface frame has
+/// been drawn by Slint's renderer. This is deliberately a draw-completion
+/// hook rather than a platform-specific swap/vsync promise.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slint_native_surface_set_rendered_callback(
+    callback: Option<unsafe extern "C" fn(i32, u64, *mut c_void)>,
+    user_data: *mut c_void,
+) {
+    set_native_surface_rendered_callback(callback.map(|callback| NativeSurfaceRenderedCallback {
+        callback,
+        user_data,
+    }));
 }
 
 #[cfg(feature = "i-slint-backend-selector")]
