@@ -90,6 +90,9 @@ pub enum RenderSurfaceCommand {
         color: Color,
         /// Optional foreground-colour overrides for byte ranges in `text`.
         spans: Vec<RenderSurfaceTextSpan>,
+        /// UTF-8 byte boundaries for which the host needs authoritative
+        /// post-shaping caret geometry. Invalid boundaries are ignored.
+        layout_stops: Vec<u32>,
         font: FontRequest,
         horizontal_alignment: TextHorizontalAlignment,
         vertical_alignment: TextVerticalAlignment,
@@ -109,6 +112,13 @@ pub struct RenderSurfaceLayoutCluster {
     pub width: f32,
 }
 
+/// One requested logical cursor boundary resolved by the shaping engine.
+#[derive(Clone, Copy, Default)]
+pub struct RenderSurfaceLayoutStop {
+    pub byte_offset: u32,
+    pub x: f32,
+}
+
 /// Immutable post-shaping geometry for one text command. This is deliberately
 /// renderer-neutral: hosts receive logical cluster positions, never renderer
 /// objects or glyph cache handles.
@@ -118,6 +128,7 @@ pub struct RenderSurfaceLayoutSnapshot {
     pub baseline: f32,
     pub advance: f32,
     pub clusters: Vec<RenderSurfaceLayoutCluster>,
+    pub stops: Vec<RenderSurfaceLayoutStop>,
 }
 
 /// A foreground-colour override within a UTF-8 text command.
@@ -466,6 +477,37 @@ mod tests {
         assert!(Rc::ptr_eq(&frame.commands, &base));
         assert!(frame.underlay_commands.is_empty());
         assert!(frame.overlay_commands.is_empty());
+    }
+
+    #[test]
+    fn registry_preserves_requested_text_layout_stops() {
+        publish_render_surface_frame(
+            19,
+            RenderSurfaceFrame {
+                generation: 1,
+                base_generation: 4,
+                commands: Rc::new(alloc::vec![RenderSurfaceCommand::Text {
+                    layout_key: 9,
+                    x: 0.,
+                    y: 0.,
+                    width: 100.,
+                    height: 20.,
+                    text: SharedString::from("a🙂"),
+                    color: Color::default(),
+                    spans: Default::default(),
+                    layout_stops: alloc::vec![0, 1, 5],
+                    font: Default::default(),
+                    horizontal_alignment: TextHorizontalAlignment::Left,
+                    vertical_alignment: TextVerticalAlignment::Center,
+                }]),
+                ..Default::default()
+            },
+        );
+        let frame = render_surface_frame(19).unwrap();
+        let RenderSurfaceCommand::Text { layout_stops, .. } = &frame.commands[0] else {
+            panic!("expected text command")
+        };
+        assert_eq!(layout_stops.as_slice(), &[0, 1, 5]);
     }
 
     #[test]

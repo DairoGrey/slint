@@ -50,6 +50,8 @@ pub struct RenderSurfaceCommandData {
     text_len: usize,
     text_spans: *const RenderSurfaceTextSpanData,
     text_span_count: usize,
+    layout_stops: *const u32,
+    layout_stop_count: usize,
     font_family: *const u8,
     font_family_len: usize,
     font_size: f32,
@@ -74,12 +76,20 @@ pub struct RenderSurfaceLayoutClusterData {
 }
 
 #[repr(C)]
+pub struct RenderSurfaceLayoutStopData {
+    byte_offset: u32,
+    x: f32,
+}
+
+#[repr(C)]
 pub struct RenderSurfaceLayoutSnapshotData {
     layout_key: u64,
     baseline: f32,
     advance: f32,
     clusters: *const RenderSurfaceLayoutClusterData,
     cluster_count: usize,
+    stops: *const RenderSurfaceLayoutStopData,
+    stop_count: usize,
 }
 
 #[repr(C)]
@@ -89,6 +99,8 @@ pub struct RenderSurfaceLayoutBatchEntryData {
     advance: f32,
     cluster_offset: usize,
     cluster_count: usize,
+    stop_offset: usize,
+    stop_count: usize,
 }
 
 #[repr(C)]
@@ -97,6 +109,8 @@ pub struct RenderSurfaceLayoutBatchData {
     entry_count: usize,
     clusters: *const RenderSurfaceLayoutClusterData,
     cluster_count: usize,
+    stops: *const RenderSurfaceLayoutStopData,
+    stop_count: usize,
 }
 
 unsafe extern "C" fn render_surface_layout_callback_bridge(
@@ -115,6 +129,7 @@ unsafe extern "C" fn render_surface_layout_callback_bridge(
             return;
         };
         let mut clusters = alloc::vec::Vec::new();
+        let mut stops = alloc::vec::Vec::new();
         let entries = snapshots
             .iter()
             .map(|snapshot| {
@@ -127,12 +142,19 @@ unsafe extern "C" fn render_surface_layout_callback_bridge(
                         width: cluster.width,
                     }
                 }));
+                let stop_offset = stops.len();
+                stops.extend(snapshot.stops.iter().map(|stop| RenderSurfaceLayoutStopData {
+                    byte_offset: stop.byte_offset,
+                    x: stop.x,
+                }));
                 RenderSurfaceLayoutBatchEntryData {
                     layout_key: snapshot.layout_key,
                     baseline: snapshot.baseline,
                     advance: snapshot.advance,
                     cluster_offset,
                     cluster_count: snapshot.clusters.len(),
+                    stop_offset,
+                    stop_count: snapshot.stops.len(),
                 }
             })
             .collect::<alloc::vec::Vec<_>>();
@@ -141,6 +163,8 @@ unsafe extern "C" fn render_surface_layout_callback_bridge(
             entry_count: entries.len(),
             clusters: clusters.as_ptr(),
             cluster_count: clusters.len(),
+            stops: stops.as_ptr(),
+            stop_count: stops.len(),
         };
         unsafe { callback(surface_id, base_generation, &payload, user_data) };
     });
@@ -198,36 +222,53 @@ unsafe fn render_surface_commands(
                 height: command.height,
                 color,
             },
-            1 => RenderSurfaceCommand::Text {
-                layout_key: command.layout_key,
-                x: command.x,
-                y: command.y,
-                width: command.width,
-                height: command.height,
-                text: ffi_string(command.text, command.text_len),
-                color,
-                spans: ffi_text_spans(
-                    command.text_spans,
-                    command.text_span_count,
-                    command.text_len,
-                ),
-                font: FontRequest {
-                    family: Some(ffi_string(command.font_family, command.font_family_len)),
-                    weight: Some(command.font_weight),
-                    pixel_size: Some(LogicalLength::new(command.font_size)),
-                    ..Default::default()
-                },
-                horizontal_alignment: match command.horizontal_alignment {
-                    1 => TextHorizontalAlignment::Center,
-                    2 => TextHorizontalAlignment::Right,
-                    _ => TextHorizontalAlignment::Left,
-                },
-                vertical_alignment: match command.vertical_alignment {
-                    1 => TextVerticalAlignment::Center,
-                    2 => TextVerticalAlignment::Bottom,
-                    _ => TextVerticalAlignment::Top,
-                },
-            },
+            1 => {
+                let text = ffi_string(command.text, command.text_len);
+                let layout_stops = if command.layout_stops.is_null()
+                    || command.layout_stop_count == 0
+                {
+                    Default::default()
+                } else {
+                    unsafe {
+                        core::slice::from_raw_parts(command.layout_stops, command.layout_stop_count)
+                    }
+                    .iter()
+                    .copied()
+                    .filter(|offset| text.as_str().is_char_boundary(*offset as usize))
+                    .collect()
+                };
+                RenderSurfaceCommand::Text {
+                    layout_key: command.layout_key,
+                    x: command.x,
+                    y: command.y,
+                    width: command.width,
+                    height: command.height,
+                    text,
+                    color,
+                    spans: ffi_text_spans(
+                        command.text_spans,
+                        command.text_span_count,
+                        command.text_len,
+                    ),
+                    layout_stops,
+                    font: FontRequest {
+                        family: Some(ffi_string(command.font_family, command.font_family_len)),
+                        weight: Some(command.font_weight),
+                        pixel_size: Some(LogicalLength::new(command.font_size)),
+                        ..Default::default()
+                    },
+                    horizontal_alignment: match command.horizontal_alignment {
+                        1 => TextHorizontalAlignment::Center,
+                        2 => TextHorizontalAlignment::Right,
+                        _ => TextHorizontalAlignment::Left,
+                    },
+                    vertical_alignment: match command.vertical_alignment {
+                        1 => TextVerticalAlignment::Center,
+                        2 => TextVerticalAlignment::Bottom,
+                        _ => TextVerticalAlignment::Top,
+                    },
+                }
+            }
             _ => RenderSurfaceCommand::Line {
                 x: command.x,
                 y: command.y,

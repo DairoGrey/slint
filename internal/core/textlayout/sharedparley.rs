@@ -1639,11 +1639,17 @@ pub fn draw_text_with_render_surface_layout(
     size: LogicalSize,
     cache: Option<&TextLayoutCache>,
     layout_key: u64,
+    layout_stops: &[u32],
     mut observe_layout: impl FnMut(crate::render_surface::RenderSurfaceLayoutSnapshot),
 ) {
     let scale_factor = ScaleFactor::new(item_renderer.scale_factor());
     draw_text_impl(item_renderer, text, item_rc, size, cache, |layout| {
-        observe_layout(render_surface_layout_snapshot(layout_key, layout, scale_factor));
+        observe_layout(render_surface_layout_snapshot(
+            layout_key,
+            layout,
+            scale_factor,
+            layout_stops,
+        ));
     });
 }
 
@@ -1651,6 +1657,7 @@ fn render_surface_layout_snapshot(
     layout_key: u64,
     layout: &Layout,
     scale_factor: ScaleFactor,
+    requested_stops: &[u32],
 ) -> crate::render_surface::RenderSurfaceLayoutSnapshot {
     let mut snapshot =
         crate::render_surface::RenderSurfaceLayoutSnapshot { layout_key, ..Default::default() };
@@ -1681,6 +1688,17 @@ fn render_surface_layout_snapshot(
                 }
             }
         }
+    }
+    for &byte_offset in requested_stops {
+        let offset = byte_offset as usize;
+        let cursor = layout.cursor_rect_for_byte_offset(
+            offset,
+            PhysicalLength::new(1.0),
+        );
+        snapshot.stops.push(crate::render_surface::RenderSurfaceLayoutStop {
+            byte_offset,
+            x: cursor.origin.x / scale,
+        });
     }
     snapshot
 }
@@ -1778,6 +1796,7 @@ pub fn draw_render_surface<R: GlyphRenderer>(
                 text,
                 color,
                 spans,
+                layout_stops,
                 font,
                 horizontal_alignment,
                 vertical_alignment,
@@ -1804,6 +1823,7 @@ pub fn draw_render_surface<R: GlyphRenderer>(
                     LogicalSize::new(*width, *height),
                     None,
                     *layout_key,
+                    layout_stops,
                     |value| snapshot = Some(value),
                 );
                 renderer.restore_state();
@@ -2347,6 +2367,34 @@ mod tests {
             layout.cursor_rect_for_byte_offset(6, cursor_width),
             layout.cursor_rect_for_byte_offset(0, cursor_width)
         );
+    }
+
+    #[test]
+    fn render_surface_layout_stops_use_parley_cursor_geometry() {
+        let text = "a🙂fi";
+        let layout = layout_text(text);
+        let requested = [0, 1, 5, 6, text.len() as u32];
+        let snapshot = render_surface_layout_snapshot(
+            17,
+            &layout,
+            ScaleFactor::new(1.0),
+            &requested,
+        );
+
+        assert_eq!(snapshot.layout_key, 17);
+        assert_eq!(snapshot.stops.len(), requested.len());
+        for (stop, requested_offset) in snapshot.stops.iter().zip(requested) {
+            assert_eq!(stop.byte_offset, requested_offset);
+            let expected = layout
+                .cursor_rect_for_byte_offset(
+                    requested_offset as usize,
+                    PhysicalLength::new(1.0),
+                )
+                .origin
+                .x;
+            assert_eq!(stop.x, expected);
+        }
+        assert!(snapshot.stops.windows(2).all(|pair| pair[0].x <= pair[1].x));
     }
 
     #[test]

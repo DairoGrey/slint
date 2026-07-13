@@ -37,6 +37,11 @@ struct RenderSurfaceLayoutCluster {
     float width = 0.f;
 };
 
+struct RenderSurfaceLayoutStop {
+    std::uint32_t byte_offset = 0;
+    float x = 0.f;
+};
+
 /// Immutable layout data delivered during the render-surface render pass.
 /// `clusters` is valid only for the duration of the callback.
 struct RenderSurfaceLayoutSnapshot {
@@ -45,6 +50,8 @@ struct RenderSurfaceLayoutSnapshot {
     float advance = 0.f;
     const RenderSurfaceLayoutCluster *clusters = nullptr;
     std::size_t cluster_count = 0;
+    const RenderSurfaceLayoutStop *stops = nullptr;
+    std::size_t stop_count = 0;
 };
 
 /// A bounded primitive in a renderer-backed render surface.
@@ -60,6 +67,9 @@ struct RenderSurfaceCommand {
     std::uint32_t color_argb = 0;
     SharedString text;
     std::vector<RenderSurfaceTextSpan> text_spans;
+    /// UTF-8 byte boundaries for which the shaping backend reports exact
+    /// caret x coordinates in the matching layout snapshot.
+    std::vector<std::uint32_t> layout_stops;
     SharedString font_family;
     float font_size = 0.f;
     std::int32_t font_weight = 400;
@@ -144,13 +154,18 @@ public:
     {
         const auto encode = [](const std::vector<RenderSurfaceCommand>& source,
                                std::vector<cbindgen_private::RenderSurfaceCommandData>& commands,
-                               std::vector<cbindgen_private::RenderSurfaceTextSpanData>& spans) {
+                               std::vector<cbindgen_private::RenderSurfaceTextSpanData>& spans,
+                               std::vector<std::uint32_t>& stops) {
             std::size_t span_count = 0;
+            std::size_t stop_count = 0;
             for (const auto &command : source) span_count += command.text_spans.size();
+            for (const auto &command : source) stop_count += command.layout_stops.size();
             spans.reserve(span_count);
+            stops.reserve(stop_count);
             commands.reserve(source.size());
             for (const auto &command : source) {
             const auto first_span = spans.size();
+            const auto first_stop = stops.size();
             for (const auto &span : command.text_spans) {
                 spans.push_back({
                     .start_byte = span.start_byte,
@@ -158,6 +173,7 @@ public:
                     .color_argb = span.color_argb,
                 });
             }
+            stops.insert(stops.end(), command.layout_stops.begin(), command.layout_stops.end());
                 commands.push_back({
                     .kind = static_cast<std::uint8_t>(command.kind),
                     .layout_key = command.layout_key,
@@ -170,6 +186,8 @@ public:
                     .text_len = command.text.size(),
                     .text_spans = command.text_spans.empty() ? nullptr : spans.data() + first_span,
                     .text_span_count = command.text_spans.size(),
+                    .layout_stops = command.layout_stops.empty() ? nullptr : stops.data() + first_stop,
+                    .layout_stop_count = command.layout_stops.size(),
                     .font_family = reinterpret_cast<const std::uint8_t *>(command.font_family.data()),
                     .font_family_len = command.font_family.size(),
                     .font_size = command.font_size,
@@ -181,13 +199,16 @@ public:
         };
         std::vector<cbindgen_private::RenderSurfaceCommandData> commands;
         std::vector<cbindgen_private::RenderSurfaceTextSpanData> spans;
+        std::vector<std::uint32_t> stops;
         std::vector<cbindgen_private::RenderSurfaceCommandData> overlay_commands;
         std::vector<cbindgen_private::RenderSurfaceTextSpanData> overlay_spans;
+        std::vector<std::uint32_t> overlay_stops;
         std::vector<cbindgen_private::RenderSurfaceCommandData> underlay_commands;
         std::vector<cbindgen_private::RenderSurfaceTextSpanData> underlay_spans;
-        encode(frame.commands_, commands, spans);
-        encode(frame.underlay_commands_, underlay_commands, underlay_spans);
-        encode(frame.overlay_commands_, overlay_commands, overlay_spans);
+        std::vector<std::uint32_t> underlay_stops;
+        encode(frame.commands_, commands, spans, stops);
+        encode(frame.underlay_commands_, underlay_commands, underlay_spans, underlay_stops);
+        encode(frame.overlay_commands_, overlay_commands, overlay_spans, overlay_stops);
         cbindgen_private::slint_render_surface_publish_layers(
                 surface_id, frame.generation_, frame.base_generation_, frame.underlay_generation_, frame.overlay_generation_,
                 commands.data(), commands.size(), underlay_commands.data(), underlay_commands.size(),
@@ -200,22 +221,30 @@ public:
     {
         const auto encode = [](const std::vector<RenderSurfaceCommand>& source,
                                std::vector<cbindgen_private::RenderSurfaceCommandData>& commands,
-                               std::vector<cbindgen_private::RenderSurfaceTextSpanData>& spans) {
+                               std::vector<cbindgen_private::RenderSurfaceTextSpanData>& spans,
+                               std::vector<std::uint32_t>& stops) {
             std::size_t span_count = 0;
+            std::size_t stop_count = 0;
             for (const auto &command : source) span_count += command.text_spans.size();
+            for (const auto &command : source) stop_count += command.layout_stops.size();
             spans.reserve(span_count);
+            stops.reserve(stop_count);
             commands.reserve(source.size());
             for (const auto &command : source) {
                 const auto first_span = spans.size();
+                const auto first_stop = stops.size();
                 for (const auto &span : command.text_spans) {
                     spans.push_back({ .start_byte = span.start_byte, .end_byte = span.end_byte, .color_argb = span.color_argb });
                 }
+                stops.insert(stops.end(), command.layout_stops.begin(), command.layout_stops.end());
                 commands.push_back({
                     .kind = static_cast<std::uint8_t>(command.kind), .layout_key = command.layout_key, .x = command.x, .y = command.y,
                     .width = command.width, .height = command.height, .color_argb = command.color_argb,
                     .text = reinterpret_cast<const std::uint8_t *>(command.text.data()), .text_len = command.text.size(),
                     .text_spans = command.text_spans.empty() ? nullptr : spans.data() + first_span,
                     .text_span_count = command.text_spans.size(),
+                    .layout_stops = command.layout_stops.empty() ? nullptr : stops.data() + first_stop,
+                    .layout_stop_count = command.layout_stops.size(),
                     .font_family = reinterpret_cast<const std::uint8_t *>(command.font_family.data()),
                     .font_family_len = command.font_family.size(), .font_size = command.font_size,
                     .font_weight = command.font_weight,
@@ -226,9 +255,10 @@ public:
         };
         std::vector<cbindgen_private::RenderSurfaceCommandData> base, underlay, overlay;
         std::vector<cbindgen_private::RenderSurfaceTextSpanData> base_spans, underlay_spans, overlay_spans;
-        if (changed_layers & static_cast<std::uint8_t>(RenderSurfaceLayer::Base)) encode(frame.commands_, base, base_spans);
-        if (changed_layers & static_cast<std::uint8_t>(RenderSurfaceLayer::Underlay)) encode(frame.underlay_commands_, underlay, underlay_spans);
-        if (changed_layers & static_cast<std::uint8_t>(RenderSurfaceLayer::Overlay)) encode(frame.overlay_commands_, overlay, overlay_spans);
+        std::vector<std::uint32_t> base_stops, underlay_stops, overlay_stops;
+        if (changed_layers & static_cast<std::uint8_t>(RenderSurfaceLayer::Base)) encode(frame.commands_, base, base_spans, base_stops);
+        if (changed_layers & static_cast<std::uint8_t>(RenderSurfaceLayer::Underlay)) encode(frame.underlay_commands_, underlay, underlay_spans, underlay_stops);
+        if (changed_layers & static_cast<std::uint8_t>(RenderSurfaceLayer::Overlay)) encode(frame.overlay_commands_, overlay, overlay_spans, overlay_stops);
         cbindgen_private::slint_render_surface_publish_layers_delta(
             surface_id, frame.generation_, frame.base_generation_, frame.underlay_generation_, frame.overlay_generation_, changed_layers,
             base.data(), base.size(), underlay.data(), underlay.size(), overlay.data(), overlay.size());
@@ -250,13 +280,18 @@ private:
         for (std::size_t index = 0; index < source->entry_count; ++index) {
             const auto& entry = source->entries[index];
             if (entry.cluster_offset > source->cluster_count
-                || entry.cluster_count > source->cluster_count - entry.cluster_offset) continue;
+                || entry.cluster_count > source->cluster_count - entry.cluster_offset
+                || entry.stop_offset > source->stop_count
+                || entry.stop_count > source->stop_count - entry.stop_offset) continue;
             const RenderSurfaceLayoutSnapshot snapshot {
                 .layout_key = entry.layout_key,
                 .baseline = entry.baseline,
                 .advance = entry.advance,
                 .clusters = reinterpret_cast<const RenderSurfaceLayoutCluster*>(source->clusters + entry.cluster_offset),
                 .cluster_count = entry.cluster_count,
+                .stops = entry.stop_count == 0 ? nullptr
+                    : reinterpret_cast<const RenderSurfaceLayoutStop*>(source->stops + entry.stop_offset),
+                .stop_count = entry.stop_count,
             };
             layout_callback_(surface_id, base_generation, snapshot, layout_user_data_);
         }
