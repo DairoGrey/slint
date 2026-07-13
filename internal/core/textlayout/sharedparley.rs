@@ -1700,6 +1700,10 @@ pub fn draw_native_surface<R: GlyphRenderer>(
     let Some(frame) = crate::native_surface::native_surface_frame(surface.surface_id()) else {
         return;
     };
+    crate::native_surface::notify_native_surface_draw_started(
+        surface.surface_id(), frame.generation, frame.commands.len(),
+        frame.underlay_commands.len(), frame.overlay_commands.len(),
+    );
     renderer.save_state();
     if !renderer.combine_clip(
         LogicalRect::from(size),
@@ -1709,6 +1713,11 @@ pub fn draw_native_surface<R: GlyphRenderer>(
         renderer.restore_state();
         return;
     }
+    // Layout snapshots are deliberately delivered once after the draw loop.
+    // Calling through the host bridge after every logical line made the
+    // renderer repeatedly cross the Rust/C++ boundary while glyph work was
+    // still in progress.
+    let mut layout_snapshots = Vec::new();
     for command in frame.underlay_commands.iter().chain(frame.commands.iter()).chain(frame.overlay_commands.iter()) {
         match command {
             crate::native_surface::NativeSurfaceCommand::FillRect { x, y, width, height, color }
@@ -1751,14 +1760,13 @@ pub fn draw_native_surface<R: GlyphRenderer>(
                     |value| snapshot = Some(value),
                 );
                 renderer.restore_state();
-                if let Some(snapshot) = snapshot {
-                    crate::native_surface::notify_native_surface_layout(
-                        surface.surface_id(), frame.base_generation, &snapshot);
-                }
+                if let Some(snapshot) = snapshot { layout_snapshots.push(snapshot); }
             }
         }
     }
     renderer.restore_state();
+    crate::native_surface::notify_native_surface_layout_batch(
+        surface.surface_id(), frame.base_generation, &layout_snapshots);
     crate::native_surface::notify_native_surface_rendered(surface.surface_id(), frame.generation);
 }
 
