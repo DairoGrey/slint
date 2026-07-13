@@ -71,6 +71,9 @@ pub enum NativeSurfaceCommand {
     FillRect { x: f32, y: f32, width: f32, height: f32, color: Color },
     /// A text run with an explicit font request and local origin.
     Text {
+        /// Stable host-assigned key used to correlate post-shaping geometry
+        /// with this exact text command. Zero opts out of layout reporting.
+        layout_key: u64,
         x: f32,
         y: f32,
         width: f32,
@@ -88,6 +91,27 @@ pub enum NativeSurfaceCommand {
     Line { x: f32, y: f32, width: f32, height: f32, color: Color },
 }
 
+/// One shaped text cluster in a native-surface text command. Coordinates are
+/// local logical coordinates relative to the command's origin.
+#[derive(Clone, Copy, Default)]
+pub struct NativeSurfaceLayoutCluster {
+    pub start_byte: u32,
+    pub end_byte: u32,
+    pub x: f32,
+    pub width: f32,
+}
+
+/// Immutable post-shaping geometry for one text command. This is deliberately
+/// renderer-neutral: hosts receive logical cluster positions, never renderer
+/// objects or glyph cache handles.
+#[derive(Clone, Default)]
+pub struct NativeSurfaceLayoutSnapshot {
+    pub layout_key: u64,
+    pub baseline: f32,
+    pub advance: f32,
+    pub clusters: Vec<NativeSurfaceLayoutCluster>,
+}
+
 /// A foreground-colour override within a UTF-8 text command.
 #[derive(Clone)]
 pub struct NativeSurfaceTextSpan {
@@ -102,6 +126,7 @@ thread_local! {
     // registry. It is a diagnostic lifecycle hook for hosts; renderers do not
     // retain host state or depend on a callback being installed.
     static RENDERED_CALLBACK: RefCell<Option<NativeSurfaceRenderedCallback>> = Default::default();
+    static LAYOUT_CALLBACK: RefCell<Option<NativeSurfaceLayoutCallback>> = Default::default();
 }
 
 #[derive(Clone, Copy)]
@@ -110,10 +135,38 @@ pub struct NativeSurfaceRenderedCallback {
     pub user_data: *mut c_void,
 }
 
+#[derive(Clone, Copy)]
+pub struct NativeSurfaceLayoutCallback {
+    pub callback: unsafe extern "C" fn(i32, u64, *const NativeSurfaceLayoutSnapshot, *mut c_void),
+    pub user_data: *mut c_void,
+}
+
 /// Installs (or clears) the callback emitted after a native surface has been
 /// rendered by the active backend. The callback runs on Slint's UI thread.
 pub fn set_native_surface_rendered_callback(callback: Option<NativeSurfaceRenderedCallback>) {
     RENDERED_CALLBACK.with(|slot| *slot.borrow_mut() = callback);
+}
+
+/// Installs the UI-thread callback that receives geometry from the same Parley
+/// layout used to render each native-surface text command.
+pub fn set_native_surface_layout_callback(callback: Option<NativeSurfaceLayoutCallback>) {
+    LAYOUT_CALLBACK.with(|slot| *slot.borrow_mut() = callback);
+}
+
+#[allow(unsafe_code)] // FFI callback is installed only by the public C++ bridge.
+pub fn notify_native_surface_layout(
+    surface_id: i32,
+    base_generation: u64,
+    snapshot: &NativeSurfaceLayoutSnapshot,
+) {
+    if snapshot.layout_key == 0 {
+        return;
+    }
+    LAYOUT_CALLBACK.with(|slot| {
+        if let Some(callback) = *slot.borrow() {
+            unsafe { (callback.callback)(surface_id, base_generation, snapshot as *const _, callback.user_data) };
+        }
+    });
 }
 
 /// Called by the shared native-surface drawing path after all three layers

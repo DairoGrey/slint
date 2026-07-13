@@ -1494,6 +1494,20 @@ pub fn draw_text(
     size: LogicalSize,
     cache: Option<&TextLayoutCache>,
 ) {
+    draw_text_impl(item_renderer, text, item_rc, size, cache, |_| {});
+}
+
+/// Draw text and expose the exact Parley layout immediately before it is
+/// rendered. Native surfaces use this to publish hit-test geometry without a
+/// second shaping pass. The callback must not retain the borrowed layout.
+fn draw_text_impl(
+    item_renderer: &mut impl GlyphRenderer,
+    text: Pin<&dyn crate::item_rendering::RenderText>,
+    item_rc: Option<&crate::item_tree::ItemRc>,
+    size: LogicalSize,
+    cache: Option<&TextLayoutCache>,
+    mut observe_layout: impl FnMut(&Layout),
+) {
     let max_width = size.width_length();
     let max_height = size.height_length();
 
@@ -1579,6 +1593,7 @@ pub fn draw_text(
     };
 
     if render {
+        observe_layout(&layout);
         layout.draw(
             item_renderer,
             platform_fill_brush,
@@ -1612,6 +1627,63 @@ pub fn draw_text(
     // Put paragraphs back into the cache guard for reuse.
     // break_all_lines replaces line data each time, so the state is ready for the next call.
     guard.paragraphs = Some(layout.paragraphs);
+}
+
+/// Draw text while exposing a renderer-neutral cluster snapshot produced by
+/// the exact Parley layout that is about to be drawn. This keeps the private
+/// `Layout` implementation detail inside the shared text module.
+pub fn draw_text_with_native_surface_layout(
+    item_renderer: &mut impl GlyphRenderer,
+    text: Pin<&dyn crate::item_rendering::RenderText>,
+    item_rc: Option<&crate::item_tree::ItemRc>,
+    size: LogicalSize,
+    cache: Option<&TextLayoutCache>,
+    layout_key: u64,
+    mut observe_layout: impl FnMut(crate::native_surface::NativeSurfaceLayoutSnapshot),
+) {
+    let scale_factor = ScaleFactor::new(item_renderer.scale_factor());
+    draw_text_impl(item_renderer, text, item_rc, size, cache, |layout| {
+        observe_layout(native_surface_layout_snapshot(layout_key, layout, scale_factor));
+    });
+}
+
+fn native_surface_layout_snapshot(
+    layout_key: u64,
+    layout: &Layout,
+    scale_factor: ScaleFactor,
+) -> crate::native_surface::NativeSurfaceLayoutSnapshot {
+    let mut snapshot = crate::native_surface::NativeSurfaceLayoutSnapshot {
+        layout_key,
+        ..Default::default()
+    };
+    if layout_key == 0 {
+        return snapshot;
+    }
+    let scale = scale_factor.get();
+    if scale <= 0.0 {
+        return snapshot;
+    }
+    for paragraph in &layout.paragraphs {
+        for line in paragraph.layout.lines() {
+            let metrics = line.metrics();
+            snapshot.baseline = (layout.y_offset.get() + paragraph.y.get() + metrics.baseline) / scale;
+            snapshot.advance = snapshot.advance.max(metrics.advance / scale);
+            let mut x = metrics.offset + metrics.inline_min_coord;
+            for run in line.runs() {
+                for cluster in run.visual_clusters() {
+                    let range = cluster.text_range();
+                    snapshot.clusters.push(crate::native_surface::NativeSurfaceLayoutCluster {
+                        start_byte: range.start as u32,
+                        end_byte: range.end as u32,
+                        x: x / scale,
+                        width: cluster.advance() / scale,
+                    });
+                    x += cluster.advance();
+                }
+            }
+        }
+    }
+    snapshot
 }
 
 /// Draws the immutable frame of a [`crate::items::NativeSurfaceItem`].
@@ -1656,7 +1728,7 @@ pub fn draw_native_surface<R: GlyphRenderer>(
                 renderer.restore_state();
             }
             crate::native_surface::NativeSurfaceCommand::Text {
-                x, y, width, height, text, color, spans, font, horizontal_alignment, vertical_alignment,
+                layout_key, x, y, width, height, text, color, spans, font, horizontal_alignment, vertical_alignment,
             } => {
                 if *width <= 0. || *height <= 0. || text.is_empty() { continue; }
                 renderer.save_state();
@@ -1668,14 +1740,21 @@ pub fn draw_native_surface<R: GlyphRenderer>(
                     vertical_alignment: *vertical_alignment,
                 };
                 let run = core::pin::Pin::new(&run);
-                draw_text(
+                let mut snapshot = None;
+                draw_text_with_native_surface_layout(
                     renderer,
                     run,
                     Some(self_rc),
                     LogicalSize::new(*width, *height),
                     None,
+                    *layout_key,
+                    |value| snapshot = Some(value),
                 );
                 renderer.restore_state();
+                if let Some(snapshot) = snapshot {
+                    crate::native_surface::notify_native_surface_layout(
+                        surface.surface_id(), frame.base_generation, &snapshot);
+                }
             }
         }
     }
