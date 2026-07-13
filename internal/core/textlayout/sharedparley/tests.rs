@@ -104,6 +104,30 @@ fn test_cursor_between_cr_and_lf() {
 }
 
 #[test]
+fn render_surface_layout_stops_use_parley_cursor_geometry() {
+    let text = "a🙂fi";
+    let layout = layout_text(text);
+    let requested = [0, 1, 5, 6, text.len() as u32];
+    let snapshot =
+        render_surface_layout_snapshot(17, &layout, ScaleFactor::new(1.0), &requested);
+
+    assert_eq!(snapshot.layout_key, 17);
+    assert_eq!(snapshot.stops.len(), requested.len());
+    for (stop, requested_offset) in snapshot.stops.iter().zip(requested) {
+        assert_eq!(stop.byte_offset, requested_offset);
+        let expected = layout
+            .cursor_rect_for_byte_offset(
+                requested_offset as usize,
+                PhysicalLength::new(1.0),
+            )
+            .origin
+            .x;
+        assert_eq!(stop.x, expected);
+    }
+    assert!(snapshot.stops.windows(2).all(|pair| pair[0].x <= pair[1].x));
+}
+
+#[test]
 fn test_paragraph_ranges() {
     assert_eq!(paragraphs(""), [""]);
     assert_eq!(paragraphs("hello"), ["hello"]);

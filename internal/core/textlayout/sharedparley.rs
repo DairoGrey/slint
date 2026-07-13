@@ -256,11 +256,17 @@ pub fn draw_text_with_render_surface_layout(
     size: LogicalSize,
     cache: Option<&TextLayoutCache>,
     layout_key: u64,
+    layout_stops: &[u32],
     mut observe_layout: impl FnMut(crate::render_surface::RenderSurfaceLayoutSnapshot),
 ) {
     let scale_factor = item_renderer.scale_factor();
     draw_text_impl(item_renderer, text, item_rc, size, cache, |layout| {
-        observe_layout(render_surface_layout_snapshot(layout_key, layout, scale_factor));
+        observe_layout(render_surface_layout_snapshot(
+            layout_key,
+            layout,
+            scale_factor,
+            layout_stops,
+        ));
     });
 }
 
@@ -268,6 +274,7 @@ fn render_surface_layout_snapshot(
     layout_key: u64,
     layout: &Layout,
     scale_factor: ScaleFactor,
+    requested_stops: &[u32],
 ) -> crate::render_surface::RenderSurfaceLayoutSnapshot {
     let mut snapshot =
         crate::render_surface::RenderSurfaceLayoutSnapshot { layout_key, ..Default::default() };
@@ -298,6 +305,16 @@ fn render_surface_layout_snapshot(
                 }
             }
         }
+    }
+    for &byte_offset in requested_stops {
+        let cursor = layout.cursor_rect_for_byte_offset(
+            byte_offset as usize,
+            PhysicalLength::new(1.0),
+        );
+        snapshot.stops.push(crate::render_surface::RenderSurfaceLayoutStop {
+            byte_offset,
+            x: cursor.origin.x / scale,
+        });
     }
     snapshot
 }
@@ -395,6 +412,7 @@ pub fn draw_render_surface<R: GlyphRenderer>(
                 text,
                 color,
                 spans,
+                layout_stops,
                 font,
                 horizontal_alignment,
                 vertical_alignment,
@@ -421,6 +439,7 @@ pub fn draw_render_surface<R: GlyphRenderer>(
                     LogicalSize::new(*width, *height),
                     None,
                     *layout_key,
+                    layout_stops,
                     |value| snapshot = Some(value),
                 );
                 renderer.restore_state();
