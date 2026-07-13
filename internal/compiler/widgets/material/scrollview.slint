@@ -12,6 +12,14 @@ component ScrollBar inherits Rectangle {
     in-out property <length> value;
     in-out property <bool> enabled <=> touch-area.enabled;
     in property <ScrollBarPolicy> policy: ScrollBarPolicy.as-needed;
+    in property <brush> track-color: #00000000;
+    in property <brush> track-hover-color: #00000000;
+    in property <brush> thumb-color: MaterialPalette.border;
+    in property <brush> thumb-hover-color: MaterialPalette.border;
+    in property <brush> thumb-pressed-color: MaterialPalette.border;
+    in property <length> thumb-min-size: 32px;
+    in property <length> thumb-padding: 0px;
+    in property <length> radius: 4px;
 
     callback scrolled();
 
@@ -20,40 +28,36 @@ component ScrollBar inherits Rectangle {
             background.border-color: MaterialPalette.control-foreground;
             handle.opacity: 0.12;
         }
-        hover when touch-area.has-hover : {
-            state-layer.opacity: 0.08;
-        }
-        pressed when touch-area.has-hover : {
-            state-layer.opacity: 0.12;
-        }
     ]
 
     visible: (self.policy == ScrollBarPolicy.always-on) || (self.policy == ScrollBarPolicy.as-needed && self.maximum > 0);
     clip: true;
+    background: root.track-color;
 
     state-layer := Rectangle {
         width: 100%;
         height: 100%;
-        background: MaterialPalette.accent-background;
-        border-radius: 4px;
-        opacity: 0;
+        background: root.track-hover-color;
+        border-radius: root.radius;
+        opacity: !root.enabled ? 0 : (touch-area.pressed ? 1 : (touch-area.has-hover ? 1 : 0));
         visible: handle.width > 0 && handle.height > 0;
 
         animate opacity { duration: 250ms; easing: ease; }
     }
 
     handle := Rectangle {
-        x: !root.horizontal ? 0phx : (root.width - handle.width) * (-root.value / root.maximum);
-        y: root.horizontal ? 0phx : (root.height - handle.height) * (-root.value / root.maximum);
-        width: !root.horizontal ? parent.width : root.maximum <= 0phx ? 0phx : max(min(32px, root.width), parent.width * max(root.page-size / (root.maximum + root.page-size)));
-        height: root.horizontal ? parent.height : root.maximum <= 0phx ? 0phx : max(min(32px, root.height), parent.height * (root.page-size / (root.maximum + root.page-size)));
+        x: !root.horizontal ? root.thumb-padding : (root.width - handle.width) * (-root.value / root.maximum);
+        y: root.horizontal ? root.thumb-padding : (root.height - handle.height) * (-root.value / root.maximum);
+        width: !root.horizontal ? max(0px, parent.width - 2 * root.thumb-padding) : root.maximum <= 0phx ? 0phx : max(min(root.thumb-min-size, root.width), parent.width * max(root.page-size / (root.maximum + root.page-size)));
+        height: root.horizontal ? max(0px, parent.height - 2 * root.thumb-padding) : root.maximum <= 0phx ? 0phx : max(min(root.thumb-min-size, root.height), parent.height * (root.page-size / (root.maximum + root.page-size)));
 
         background := Rectangle {
             width: 100%;
             height: 100%;
-            border-radius: 4px;
-            border-color: MaterialPalette.border;
-            border-width: 1px;
+            border-radius: root.radius;
+            background: !root.enabled ? root.thumb-color
+                : (touch-area.pressed ? root.thumb-pressed-color
+                : (touch-area.has-hover ? root.thumb-hover-color : root.thumb-color));
         }
     }
 
@@ -117,6 +121,17 @@ export component ScrollView {
     in property <ScrollBarPolicy> vertical-scrollbar-policy <=> vertical-bar.policy;
     in property <ScrollBarPolicy> horizontal-scrollbar-policy <=> horizontal-bar.policy;
     in property <bool> mouse-drag-pan-enabled <=> flickable.mouse-drag-pan-enabled;
+    // Public scrollbar styling surface. Values are intentionally shared by
+    // both axes so applications can style a ScrollView as one control.
+    in property <brush> scrollbar-track-color: #00000000;
+    in property <brush> scrollbar-track-hover-color: #00000000;
+    in property <brush> scrollbar-thumb-color: MaterialPalette.border;
+    in property <brush> scrollbar-thumb-hover-color: MaterialPalette.border;
+    in property <brush> scrollbar-thumb-pressed-color: MaterialPalette.border;
+    in property <length> scrollbar-size: 8px;
+    in property <length> scrollbar-thumb-min-size: 32px;
+    in property <length> scrollbar-thumb-padding: 0px;
+    in property <length> scrollbar-radius: 4px;
 
     callback scrolled <=> flickable.flicked;
 
@@ -140,7 +155,7 @@ export component ScrollView {
     }
 
     vertical-bar := ScrollBar {
-        width: 8px;
+        width: root.scrollbar-size;
         x: flickable.width + flickable.x;
         y: flickable.y;
         height: flickable.height;
@@ -148,12 +163,20 @@ export component ScrollView {
         maximum: flickable.viewport-height - flickable.height;
         page-size: flickable.height;
         enabled: root.enabled;
+        track-color: root.scrollbar-track-color;
+        track-hover-color: root.scrollbar-track-hover-color;
+        thumb-color: root.scrollbar-thumb-color;
+        thumb-hover-color: root.scrollbar-thumb-hover-color;
+        thumb-pressed-color: root.scrollbar-thumb-pressed-color;
+        thumb-min-size: root.scrollbar-thumb-min-size;
+        thumb-padding: root.scrollbar-thumb-padding;
+        radius: root.scrollbar-radius;
 
         scrolled => {root.scrolled()}
     }
 
     horizontal-bar := ScrollBar {
-        height: 8px;
+        height: root.scrollbar-size;
         y: flickable.height + flickable.y;
         x: flickable.x;
         width: flickable.width;
@@ -161,6 +184,14 @@ export component ScrollView {
         maximum: flickable.viewport-width - flickable.width;
         page-size: flickable.width;
         enabled: root.enabled;
+        track-color: root.scrollbar-track-color;
+        track-hover-color: root.scrollbar-track-hover-color;
+        thumb-color: root.scrollbar-thumb-color;
+        thumb-hover-color: root.scrollbar-thumb-hover-color;
+        thumb-pressed-color: root.scrollbar-thumb-pressed-color;
+        thumb-min-size: root.scrollbar-thumb-min-size;
+        thumb-padding: root.scrollbar-thumb-padding;
+        radius: root.scrollbar-radius;
 
         scrolled => {root.scrolled()}
     }
