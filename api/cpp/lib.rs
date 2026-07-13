@@ -18,7 +18,8 @@ use i_slint_core::lengths::LogicalLength;
 use i_slint_core::native_surface::{
     NativeSurfaceCommand, NativeSurfaceFrame, NativeSurfaceLayerMask, clear_native_surface_frame,
     publish_native_surface_frame, publish_native_surface_frame_delta,
-    NativeSurfaceLayoutCallback, NativeSurfaceRenderedCallback, set_native_surface_layout_callback,
+    NativeSurfaceDrawStartedCallback, NativeSurfaceLayoutBatchCallback, NativeSurfaceRenderedCallback,
+    set_native_surface_draw_started_callback, set_native_surface_layout_batch_callback,
     set_native_surface_rendered_callback,
 };
 use i_slint_core::items::OperatingSystemType;
@@ -28,7 +29,7 @@ use i_slint_core::styled_text::StyledText;
 use i_slint_core::window::{WindowAdapter, ffi::WindowAdapterRcOpaque};
 
 type NativeSurfaceLayoutCxxCallback = unsafe extern "C" fn(
-    i32, u64, *const NativeSurfaceLayoutSnapshotData, *mut c_void,
+    i32, u64, *const NativeSurfaceLayoutBatchData, *mut c_void,
 );
 
 i_slint_core::thread_local! {
@@ -82,27 +83,48 @@ pub struct NativeSurfaceLayoutSnapshotData {
     cluster_count: usize,
 }
 
+#[repr(C)]
+pub struct NativeSurfaceLayoutBatchEntryData {
+    layout_key: u64,
+    baseline: f32,
+    advance: f32,
+    cluster_offset: usize,
+    cluster_count: usize,
+}
+
+#[repr(C)]
+pub struct NativeSurfaceLayoutBatchData {
+    entries: *const NativeSurfaceLayoutBatchEntryData,
+    entry_count: usize,
+    clusters: *const NativeSurfaceLayoutClusterData,
+    cluster_count: usize,
+}
+
 unsafe extern "C" fn native_surface_layout_callback_bridge(
     surface_id: i32,
     base_generation: u64,
-    snapshot: *const i_slint_core::native_surface::NativeSurfaceLayoutSnapshot,
+    snapshots: *const i_slint_core::native_surface::NativeSurfaceLayoutSnapshot,
+    snapshot_count: usize,
     _user_data: *mut c_void,
 ) {
-    let Some(snapshot) = (unsafe { snapshot.as_ref() }) else { return; };
+    if snapshots.is_null() || snapshot_count == 0 { return; }
+    let snapshots = unsafe { core::slice::from_raw_parts(snapshots, snapshot_count) };
     NATIVE_SURFACE_LAYOUT_CXX_CALLBACK.with(|slot| {
         let Some((callback, user_data)) = *slot.borrow() else { return; };
-        let clusters = snapshot.clusters.iter().map(|cluster| NativeSurfaceLayoutClusterData {
-            start_byte: cluster.start_byte,
-            end_byte: cluster.end_byte,
-            x: cluster.x,
-            width: cluster.width,
+        let mut clusters = alloc::vec::Vec::new();
+        let entries = snapshots.iter().map(|snapshot| {
+            let cluster_offset = clusters.len();
+            clusters.extend(snapshot.clusters.iter().map(|cluster| NativeSurfaceLayoutClusterData {
+                start_byte: cluster.start_byte, end_byte: cluster.end_byte, x: cluster.x, width: cluster.width,
+            }));
+            NativeSurfaceLayoutBatchEntryData {
+                layout_key: snapshot.layout_key, baseline: snapshot.baseline, advance: snapshot.advance,
+                cluster_offset, cluster_count: snapshot.clusters.len(),
+            }
         }).collect::<alloc::vec::Vec<_>>();
-        let payload = NativeSurfaceLayoutSnapshotData {
-            layout_key: snapshot.layout_key,
-            baseline: snapshot.baseline,
-            advance: snapshot.advance,
-            clusters: clusters.as_ptr(),
-            cluster_count: clusters.len(),
+        let payload = NativeSurfaceLayoutBatchData {
+            entries: entries.as_ptr(), entry_count: entries.len(),
+            clusters: clusters.as_ptr(), cluster_count: clusters.len(),
         };
         unsafe { callback(surface_id, base_generation, &payload, user_data) };
     });
@@ -236,16 +258,29 @@ pub unsafe extern "C" fn slint_native_surface_set_rendered_callback(
     }));
 }
 
+/// Registers a callback immediately before the active backend begins drawing
+/// a native-surface frame. This is a renderer lifecycle marker, not a vsync
+/// or compositor-presentation notification.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slint_native_surface_set_draw_started_callback(
+    callback: Option<unsafe extern "C" fn(i32, u64, usize, usize, usize, *mut c_void)>,
+    user_data: *mut c_void,
+) {
+    set_native_surface_draw_started_callback(callback.map(|callback| NativeSurfaceDrawStartedCallback {
+        callback, user_data,
+    }));
+}
+
 /// Registers a callback for immutable post-shaping text geometry. Pointers are
 /// valid for the duration of the callback only and the callback runs on the
 /// Slint UI thread.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn slint_native_surface_set_layout_callback(
-    callback: Option<unsafe extern "C" fn(i32, u64, *const NativeSurfaceLayoutSnapshotData, *mut c_void)>,
+    callback: Option<unsafe extern "C" fn(i32, u64, *const NativeSurfaceLayoutBatchData, *mut c_void)>,
     user_data: *mut c_void,
 ) {
     NATIVE_SURFACE_LAYOUT_CXX_CALLBACK.with(|slot| *slot.borrow_mut() = callback.map(|callback| (callback, user_data)));
-    set_native_surface_layout_callback(callback.map(|_| NativeSurfaceLayoutCallback {
+    set_native_surface_layout_batch_callback(callback.map(|_| NativeSurfaceLayoutBatchCallback {
         callback: native_surface_layout_callback_bridge,
         user_data: core::ptr::null_mut(),
     }));

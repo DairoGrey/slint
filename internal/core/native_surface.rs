@@ -126,7 +126,8 @@ thread_local! {
     // registry. It is a diagnostic lifecycle hook for hosts; renderers do not
     // retain host state or depend on a callback being installed.
     static RENDERED_CALLBACK: RefCell<Option<NativeSurfaceRenderedCallback>> = Default::default();
-    static LAYOUT_CALLBACK: RefCell<Option<NativeSurfaceLayoutCallback>> = Default::default();
+    static DRAW_STARTED_CALLBACK: RefCell<Option<NativeSurfaceDrawStartedCallback>> = Default::default();
+    static LAYOUT_BATCH_CALLBACK: RefCell<Option<NativeSurfaceLayoutBatchCallback>> = Default::default();
 }
 
 #[derive(Clone, Copy)]
@@ -136,8 +137,14 @@ pub struct NativeSurfaceRenderedCallback {
 }
 
 #[derive(Clone, Copy)]
-pub struct NativeSurfaceLayoutCallback {
-    pub callback: unsafe extern "C" fn(i32, u64, *const NativeSurfaceLayoutSnapshot, *mut c_void),
+pub struct NativeSurfaceDrawStartedCallback {
+    pub callback: unsafe extern "C" fn(i32, u64, usize, usize, usize, *mut c_void),
+    pub user_data: *mut c_void,
+}
+
+#[derive(Clone, Copy)]
+pub struct NativeSurfaceLayoutBatchCallback {
+    pub callback: unsafe extern "C" fn(i32, u64, *const NativeSurfaceLayoutSnapshot, usize, *mut c_void),
     pub user_data: *mut c_void,
 }
 
@@ -147,24 +154,39 @@ pub fn set_native_surface_rendered_callback(callback: Option<NativeSurfaceRender
     RENDERED_CALLBACK.with(|slot| *slot.borrow_mut() = callback);
 }
 
-/// Installs the UI-thread callback that receives geometry from the same Parley
-/// layout used to render each native-surface text command.
-pub fn set_native_surface_layout_callback(callback: Option<NativeSurfaceLayoutCallback>) {
-    LAYOUT_CALLBACK.with(|slot| *slot.borrow_mut() = callback);
+pub fn set_native_surface_draw_started_callback(callback: Option<NativeSurfaceDrawStartedCallback>) {
+    DRAW_STARTED_CALLBACK.with(|slot| *slot.borrow_mut() = callback);
 }
 
 #[allow(unsafe_code)] // FFI callback is installed only by the public C++ bridge.
-pub fn notify_native_surface_layout(
+pub fn notify_native_surface_draw_started(
+    surface_id: i32, generation: u64, base: usize, underlay: usize, overlay: usize,
+) {
+    DRAW_STARTED_CALLBACK.with(|slot| {
+        if let Some(callback) = *slot.borrow() {
+            unsafe { (callback.callback)(surface_id, generation, base, underlay, overlay, callback.user_data) };
+        }
+    });
+}
+
+/// Installs the UI-thread callback that receives geometry from the same Parley
+/// layout used to render each native-surface text command.
+pub fn set_native_surface_layout_batch_callback(callback: Option<NativeSurfaceLayoutBatchCallback>) {
+    LAYOUT_BATCH_CALLBACK.with(|slot| *slot.borrow_mut() = callback);
+}
+
+#[allow(unsafe_code)] // FFI callback is installed only by the public C++ bridge.
+pub fn notify_native_surface_layout_batch(
     surface_id: i32,
     base_generation: u64,
-    snapshot: &NativeSurfaceLayoutSnapshot,
+    snapshots: &[NativeSurfaceLayoutSnapshot],
 ) {
-    if snapshot.layout_key == 0 {
+    if snapshots.is_empty() {
         return;
     }
-    LAYOUT_CALLBACK.with(|slot| {
+    LAYOUT_BATCH_CALLBACK.with(|slot| {
         if let Some(callback) = *slot.borrow() {
-            unsafe { (callback.callback)(surface_id, base_generation, snapshot as *const _, callback.user_data) };
+            unsafe { (callback.callback)(surface_id, base_generation, snapshots.as_ptr(), snapshots.len(), callback.user_data) };
         }
     });
 }

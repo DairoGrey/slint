@@ -107,6 +107,9 @@ private:
 class NativeSurfaceRegistry {
 public:
     using rendered_callback = void (*)(std::int32_t surface_id, std::uint64_t generation, void* user_data);
+    using draw_started_callback = void (*)(std::int32_t surface_id, std::uint64_t generation,
+                                           std::size_t base_commands, std::size_t underlay_commands,
+                                           std::size_t overlay_commands, void* user_data);
     using layout_callback = void (*)(std::int32_t surface_id, std::uint64_t base_generation,
                                      const NativeSurfaceLayoutSnapshot&, void* user_data);
 
@@ -116,6 +119,14 @@ public:
     static void set_rendered_callback(rendered_callback callback, void* user_data = nullptr)
     {
         cbindgen_private::slint_native_surface_set_rendered_callback(callback, user_data);
+    }
+
+    /// Receives a UI-thread marker immediately before the renderer starts a
+    /// native-surface frame. Pair it with set_rendered_callback() to measure
+    /// renderer work independently from event-loop wakeup latency.
+    static void set_draw_started_callback(draw_started_callback callback, void* user_data = nullptr)
+    {
+        cbindgen_private::slint_native_surface_set_draw_started_callback(callback, user_data);
     }
 
     /// Receives cluster geometry produced by the same backend shaping pass
@@ -232,18 +243,23 @@ private:
     static void layout_callback_adapter(
         std::int32_t surface_id,
         std::uint64_t base_generation,
-        const cbindgen_private::NativeSurfaceLayoutSnapshotData* source,
+        const cbindgen_private::NativeSurfaceLayoutBatchData* source,
         void*)
     {
-        if (!layout_callback_ || !source) return;
-        const NativeSurfaceLayoutSnapshot snapshot {
-            .layout_key = source->layout_key,
-            .baseline = source->baseline,
-            .advance = source->advance,
-            .clusters = reinterpret_cast<const NativeSurfaceLayoutCluster*>(source->clusters),
-            .cluster_count = source->cluster_count,
-        };
-        layout_callback_(surface_id, base_generation, snapshot, layout_user_data_);
+        if (!layout_callback_ || !source || !source->entries) return;
+        for (std::size_t index = 0; index < source->entry_count; ++index) {
+            const auto& entry = source->entries[index];
+            if (entry.cluster_offset > source->cluster_count
+                || entry.cluster_count > source->cluster_count - entry.cluster_offset) continue;
+            const NativeSurfaceLayoutSnapshot snapshot {
+                .layout_key = entry.layout_key,
+                .baseline = entry.baseline,
+                .advance = entry.advance,
+                .clusters = reinterpret_cast<const NativeSurfaceLayoutCluster*>(source->clusters + entry.cluster_offset),
+                .cluster_count = entry.cluster_count,
+            };
+            layout_callback_(surface_id, base_generation, snapshot, layout_user_data_);
+        }
     }
 
     inline static layout_callback layout_callback_ = nullptr;
