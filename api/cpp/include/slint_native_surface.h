@@ -28,11 +28,31 @@ struct NativeSurfaceTextSpan {
     std::uint32_t color_argb = 0;
 };
 
+/// One cluster produced by the renderer's shaping pass. Coordinates are
+/// logical and relative to the corresponding text command's origin.
+struct NativeSurfaceLayoutCluster {
+    std::uint32_t start_byte = 0;
+    std::uint32_t end_byte = 0;
+    float x = 0.f;
+    float width = 0.f;
+};
+
+/// Immutable layout data delivered during the native-surface render pass.
+/// `clusters` is valid only for the duration of the callback.
+struct NativeSurfaceLayoutSnapshot {
+    std::uint64_t layout_key = 0;
+    float baseline = 0.f;
+    float advance = 0.f;
+    const NativeSurfaceLayoutCluster *clusters = nullptr;
+    std::size_t cluster_count = 0;
+};
+
 /// A bounded primitive in a renderer-backed native surface.
 struct NativeSurfaceCommand {
     enum class Kind : std::uint8_t { FillRect, Text, Line };
 
     Kind kind = Kind::FillRect;
+    std::uint64_t layout_key = 0;
     float x = 0.f;
     float y = 0.f;
     float width = 0.f;
@@ -87,6 +107,8 @@ private:
 class NativeSurfaceRegistry {
 public:
     using rendered_callback = void (*)(std::int32_t surface_id, std::uint64_t generation, void* user_data);
+    using layout_callback = void (*)(std::int32_t surface_id, std::uint64_t base_generation,
+                                     const NativeSurfaceLayoutSnapshot&, void* user_data);
 
     /// Receives a UI-thread notification when the backend has completed the
     /// native-surface draw pass. This does not claim OS-compositor/vsync
@@ -94,6 +116,17 @@ public:
     static void set_rendered_callback(rendered_callback callback, void* user_data = nullptr)
     {
         cbindgen_private::slint_native_surface_set_rendered_callback(callback, user_data);
+    }
+
+    /// Receives cluster geometry produced by the same backend shaping pass
+    /// that draws a NativeSurfaceCommand::Text. The callback runs on the UI
+    /// thread and must copy data it needs after return.
+    static void set_layout_callback(layout_callback callback, void* user_data = nullptr)
+    {
+        layout_callback_ = callback;
+        layout_user_data_ = user_data;
+        cbindgen_private::slint_native_surface_set_layout_callback(
+            callback ? &NativeSurfaceRegistry::layout_callback_adapter : nullptr, nullptr);
     }
 
     static void publish(std::int32_t surface_id, const NativeSurfaceFrame &frame)
@@ -114,8 +147,9 @@ public:
                     .color_argb = span.color_argb,
                 });
             }
-            commands.push_back({
+                commands.push_back({
                     .kind = static_cast<std::uint8_t>(command.kind),
+                    .layout_key = command.layout_key,
                     .x = command.x,
                     .y = command.y,
                     .width = command.width,
@@ -166,7 +200,7 @@ public:
                     spans.push_back({ .start_byte = span.start_byte, .end_byte = span.end_byte, .color_argb = span.color_argb });
                 }
                 commands.push_back({
-                    .kind = static_cast<std::uint8_t>(command.kind), .x = command.x, .y = command.y,
+                    .kind = static_cast<std::uint8_t>(command.kind), .layout_key = command.layout_key, .x = command.x, .y = command.y,
                     .width = command.width, .height = command.height, .color_argb = command.color_argb,
                     .text = reinterpret_cast<const std::uint8_t *>(command.text.data()), .text_len = command.text.size(),
                     .text_spans = command.text_spans.empty() ? nullptr : spans.data() + first_span,
@@ -193,6 +227,27 @@ public:
     {
         cbindgen_private::slint_native_surface_clear(surface_id);
     }
+
+private:
+    static void layout_callback_adapter(
+        std::int32_t surface_id,
+        std::uint64_t base_generation,
+        const cbindgen_private::NativeSurfaceLayoutSnapshotData* source,
+        void*)
+    {
+        if (!layout_callback_ || !source) return;
+        const NativeSurfaceLayoutSnapshot snapshot {
+            .layout_key = source->layout_key,
+            .baseline = source->baseline,
+            .advance = source->advance,
+            .clusters = reinterpret_cast<const NativeSurfaceLayoutCluster*>(source->clusters),
+            .cluster_count = source->cluster_count,
+        };
+        layout_callback_(surface_id, base_generation, snapshot, layout_user_data_);
+    }
+
+    inline static layout_callback layout_callback_ = nullptr;
+    inline static void* layout_user_data_ = nullptr;
 };
 
 } // namespace slint

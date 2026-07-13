@@ -10,6 +10,7 @@ extern crate std;
 
 use alloc::rc::Rc;
 use alloc::string::ToString;
+use core::cell::RefCell;
 use core::ffi::c_void;
 use i_slint_core::SharedString;
 use i_slint_core::graphics::{Color, FontRequest};
@@ -17,7 +18,8 @@ use i_slint_core::lengths::LogicalLength;
 use i_slint_core::native_surface::{
     NativeSurfaceCommand, NativeSurfaceFrame, NativeSurfaceLayerMask, clear_native_surface_frame,
     publish_native_surface_frame, publish_native_surface_frame_delta,
-    NativeSurfaceRenderedCallback, set_native_surface_rendered_callback,
+    NativeSurfaceLayoutCallback, NativeSurfaceRenderedCallback, set_native_surface_layout_callback,
+    set_native_surface_rendered_callback,
 };
 use i_slint_core::items::OperatingSystemType;
 use i_slint_core::items::{TextHorizontalAlignment, TextVerticalAlignment};
@@ -25,11 +27,20 @@ use i_slint_core::slice::Slice;
 use i_slint_core::styled_text::StyledText;
 use i_slint_core::window::{WindowAdapter, ffi::WindowAdapterRcOpaque};
 
+type NativeSurfaceLayoutCxxCallback = unsafe extern "C" fn(
+    i32, u64, *const NativeSurfaceLayoutSnapshotData, *mut c_void,
+);
+
+i_slint_core::thread_local! {
+    static NATIVE_SURFACE_LAYOUT_CXX_CALLBACK: RefCell<Option<(NativeSurfaceLayoutCxxCallback, *mut c_void)>> = Default::default();
+}
+
 pub mod platform;
 
 #[repr(C)]
 pub struct NativeSurfaceCommandData {
     kind: u8,
+    layout_key: u64,
     x: f32,
     y: f32,
     width: f32,
@@ -52,6 +63,49 @@ pub struct NativeSurfaceTextSpanData {
     start_byte: u32,
     end_byte: u32,
     color_argb: u32,
+}
+
+#[repr(C)]
+pub struct NativeSurfaceLayoutClusterData {
+    start_byte: u32,
+    end_byte: u32,
+    x: f32,
+    width: f32,
+}
+
+#[repr(C)]
+pub struct NativeSurfaceLayoutSnapshotData {
+    layout_key: u64,
+    baseline: f32,
+    advance: f32,
+    clusters: *const NativeSurfaceLayoutClusterData,
+    cluster_count: usize,
+}
+
+unsafe extern "C" fn native_surface_layout_callback_bridge(
+    surface_id: i32,
+    base_generation: u64,
+    snapshot: *const i_slint_core::native_surface::NativeSurfaceLayoutSnapshot,
+    _user_data: *mut c_void,
+) {
+    let Some(snapshot) = (unsafe { snapshot.as_ref() }) else { return; };
+    NATIVE_SURFACE_LAYOUT_CXX_CALLBACK.with(|slot| {
+        let Some((callback, user_data)) = *slot.borrow() else { return; };
+        let clusters = snapshot.clusters.iter().map(|cluster| NativeSurfaceLayoutClusterData {
+            start_byte: cluster.start_byte,
+            end_byte: cluster.end_byte,
+            x: cluster.x,
+            width: cluster.width,
+        }).collect::<alloc::vec::Vec<_>>();
+        let payload = NativeSurfaceLayoutSnapshotData {
+            layout_key: snapshot.layout_key,
+            baseline: snapshot.baseline,
+            advance: snapshot.advance,
+            clusters: clusters.as_ptr(),
+            cluster_count: clusters.len(),
+        };
+        unsafe { callback(surface_id, base_generation, &payload, user_data) };
+    });
 }
 
 fn ffi_string(data: *const u8, len: usize) -> SharedString {
@@ -94,6 +148,7 @@ unsafe fn native_surface_commands(
         result.push(match command.kind {
             0 => NativeSurfaceCommand::FillRect { x: command.x, y: command.y, width: command.width, height: command.height, color },
             1 => NativeSurfaceCommand::Text {
+                layout_key: command.layout_key,
                 x: command.x, y: command.y, width: command.width, height: command.height,
                 text: ffi_string(command.text, command.text_len), color,
                 spans: ffi_text_spans(command.text_spans, command.text_span_count, command.text_len),
@@ -178,6 +233,21 @@ pub unsafe extern "C" fn slint_native_surface_set_rendered_callback(
     set_native_surface_rendered_callback(callback.map(|callback| NativeSurfaceRenderedCallback {
         callback,
         user_data,
+    }));
+}
+
+/// Registers a callback for immutable post-shaping text geometry. Pointers are
+/// valid for the duration of the callback only and the callback runs on the
+/// Slint UI thread.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slint_native_surface_set_layout_callback(
+    callback: Option<unsafe extern "C" fn(i32, u64, *const NativeSurfaceLayoutSnapshotData, *mut c_void)>,
+    user_data: *mut c_void,
+) {
+    NATIVE_SURFACE_LAYOUT_CXX_CALLBACK.with(|slot| *slot.borrow_mut() = callback.map(|callback| (callback, user_data)));
+    set_native_surface_layout_callback(callback.map(|_| NativeSurfaceLayoutCallback {
+        callback: native_surface_layout_callback_bridge,
+        user_data: core::ptr::null_mut(),
     }));
 }
 
