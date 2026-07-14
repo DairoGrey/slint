@@ -12,6 +12,9 @@ use super::{
 use crate::input::{InternalKeyEvent, KeyEventType, MouseEvent, StandardShortcut};
 use crate::item_rendering::CachedRenderingData;
 use crate::platform::Clipboard;
+use crate::properties::ChangeTracker;
+#[cfg(feature = "rtti")]
+use crate::rtti::*;
 use crate::window::{InputMethodProperties, InputMethodRequest, WindowAdapterRc, WindowInner};
 use crate::{Callback, Coord, Property, SharedString};
 use const_field_offset::FieldOffsets;
@@ -67,6 +70,24 @@ pub struct OverlayTextInputItem {
     submitted_input_generation: Cell<i32>,
     input_method_enabled: Cell<bool>,
     last_clipboard_generation: Cell<i32>,
+    input_change_tracker: ChangeTracker,
+}
+
+#[derive(Default, PartialEq)]
+struct EffectiveInputState {
+    enabled: bool,
+    has_focus: bool,
+    surrounding_text: SharedString,
+    cursor_offset: i32,
+    anchor_offset: i32,
+    preedit_text: SharedString,
+    caret_x: f32,
+    caret_y: f32,
+    caret_width: f32,
+    caret_height: f32,
+    input_generation: i32,
+    clipboard_write_text: SharedString,
+    clipboard_write_generation: i32,
 }
 
 impl OverlayTextInputItem {
@@ -246,10 +267,28 @@ impl OverlayTextInputItem {
         }
         self.submitted_input_generation.set(self.input_generation());
     }
+
+    fn process_platform_state(
+        self: Pin<&Self>,
+        window_adapter: &WindowAdapterRc,
+        self_rc: &ItemRc,
+    ) {
+        self.update_input_method(window_adapter, self_rc);
+        let generation = self.clipboard_write_generation();
+        if generation >= 0 && generation > self.last_clipboard_generation.get() {
+            WindowInner::from_pub(window_adapter.window())
+                .context()
+                .platform()
+                .set_clipboard_text(&self.clipboard_write_text(), Clipboard::DefaultClipboard);
+            self.last_clipboard_generation.set(generation);
+            self.clipboard_written_generation.set(generation);
+            self.clipboard_written.call(&());
+        }
+    }
 }
 
 impl Item for OverlayTextInputItem {
-    fn init(self: Pin<&Self>, _self_rc: &ItemRc) {
+    fn init(self: Pin<&Self>, self_rc: &ItemRc) {
         self.last_input_generation.set(i32::MIN);
         self.last_cursor_offset.set(i32::MIN);
         self.last_anchor_offset.set(i32::MIN);
@@ -261,9 +300,47 @@ impl Item for OverlayTextInputItem {
         self.input_method_enabled.set(false);
         self.last_clipboard_generation.set(-1);
         self.clipboard_written_generation.set(-1);
+        self.input_change_tracker.init(
+            self_rc.downgrade(),
+            |weak| {
+                let Some(item_rc) = weak.upgrade() else { return EffectiveInputState::default() };
+                let Some(item) = item_rc.downcast::<OverlayTextInputItem>() else {
+                    return EffectiveInputState::default();
+                };
+                let item = item.as_pin_ref();
+                let preedit_text = item.preedit_text();
+                let composition_active = !preedit_text.is_empty();
+                EffectiveInputState {
+                    enabled: item.enabled(),
+                    has_focus: item.has_focus(),
+                    surrounding_text: item.surrounding_text(),
+                    cursor_offset: item.cursor_offset(),
+                    anchor_offset: item.anchor_offset(),
+                    preedit_text,
+                    caret_x: composition_active.then(|| item.caret_x().get()).unwrap_or_default(),
+                    caret_y: composition_active.then(|| item.caret_y().get()).unwrap_or_default(),
+                    caret_width: composition_active
+                        .then(|| item.caret_width().get())
+                        .unwrap_or_default(),
+                    caret_height: composition_active
+                        .then(|| item.caret_height().get())
+                        .unwrap_or_default(),
+                    input_generation: item.input_generation(),
+                    clipboard_write_text: item.clipboard_write_text(),
+                    clipboard_write_generation: item.clipboard_write_generation(),
+                }
+            },
+            |weak, _| {
+                let Some(item_rc) = weak.upgrade() else { return };
+                let Some(item) = item_rc.downcast::<OverlayTextInputItem>() else { return };
+                let Some(window) = item_rc.window_adapter() else { return };
+                item.as_pin_ref().process_platform_state(&window, &item_rc);
+            },
+        );
     }
 
     fn deinit(self: Pin<&Self>, window_adapter: &WindowAdapterRc) {
+        self.input_change_tracker.clear();
         self.disable_input_method(window_adapter);
     }
 
@@ -413,17 +490,7 @@ impl Item for OverlayTextInputItem {
         _size: LogicalSize,
     ) -> RenderingResult {
         if let Some(window) = self_rc.window_adapter() {
-            self.update_input_method(&window, self_rc);
-            let generation = self.clipboard_write_generation();
-            if generation >= 0 && generation > self.last_clipboard_generation.get() {
-                WindowInner::from_pub(window.window())
-                    .context()
-                    .platform()
-                    .set_clipboard_text(&self.clipboard_write_text(), Clipboard::DefaultClipboard);
-                self.last_clipboard_generation.set(generation);
-                self.clipboard_written_generation.set(generation);
-                self.clipboard_written.call(&());
-            }
+            self.process_platform_state(&window, self_rc);
         }
         RenderingResult::ContinueRenderingChildren
     }

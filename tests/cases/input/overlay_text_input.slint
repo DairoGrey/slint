@@ -131,6 +131,11 @@ inner.process_key_input(InternalKeyEvent {
 });
 assert_eq!(instance.get_preedit_count(), 1);
 assert_eq!(instance.get_event_generation(), 2);
+slint_testing::mock_elapsed_time(1);
+let requests = take_requests();
+assert_eq!(requests.len(), 1);
+assert!(matches!(&requests[0], InputMethodRequest::Update(props)
+    if props.preedit_text.as_str() == "compose"));
 instance.set_caret_y(36.);
 slint_testing::mock_elapsed_time(1);
 let requests = take_requests();
@@ -138,14 +143,10 @@ assert_eq!(requests.len(), 1);
 assert!(matches!(&requests[0], InputMethodRequest::Update(props)
     if props.preedit_text.as_str() == "compose" && props.cursor_rect_origin.y == 36.));
 
-// A new generation is stale until its Update reaches the platform.
+// A new generation becomes eligible only after its Update is submitted. The
+// core item unit test covers an event injected while the generations differ;
+// the testing backend flushes pending change handlers before dispatching input.
 instance.set_input_generation(3);
-inner.process_key_input(InternalKeyEvent {
-    event_type: KeyEventType::UpdateComposition,
-    preedit_text: "stale".into(),
-    ..Default::default()
-});
-assert_eq!(instance.get_preedit_count(), 1);
 slint_testing::mock_elapsed_time(1);
 assert!(matches!(take_requests().as_slice(), [InputMethodRequest::Update(_)]));
 inner.process_key_input(InternalKeyEvent {
@@ -215,7 +216,9 @@ assert!(matches!(take_requests().as_slice(), [InputMethodRequest::Enable(_)]));
 
 // Commit remains associated with the generation submitted to the platform.
 let mut commit = InternalKeyEvent { event_type: KeyEventType::CommitComposition, ..Default::default() };
-commit.key_event = KeyEvent { text: "界".into(), ..Default::default() };
+let mut committed_key = KeyEvent::default();
+committed_key.text = "界".into();
+commit.key_event = committed_key;
 inner.process_key_input(commit);
 assert_eq!(instance.get_commit_count(), 1);
 assert_eq!(instance.get_event_generation(), 3);
