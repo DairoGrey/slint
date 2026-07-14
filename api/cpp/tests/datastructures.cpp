@@ -27,6 +27,23 @@ SCENARIO("SharedString API")
         REQUIRE(std::string_view(str.data()) == "Foo");
     }
 
+    SECTION("Construct, assign, and append an empty string_view")
+    {
+        const std::string_view empty;
+        REQUIRE(empty.data() == nullptr);
+
+        slint::SharedString from_empty(empty);
+        REQUIRE(from_empty.empty());
+
+        str = "value";
+        str = empty;
+        REQUIRE(str.empty());
+
+        str = "value";
+        str += empty;
+        REQUIRE(str == "value");
+    }
+
     SECTION("Construct from char*")
     {
         str = "Bar";

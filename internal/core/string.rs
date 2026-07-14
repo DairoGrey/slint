@@ -550,7 +550,7 @@ pub(crate) mod ffi {
     }
 
     #[unsafe(no_mangle)]
-    /// Safety: bytes must be a valid utf-8 string of size len without null inside.
+    /// Safety: when len is non-zero, bytes must point to a valid UTF-8 string of size len without null inside.
     /// The resulting structure must be passed to slint_shared_string_drop
     pub unsafe extern "C" fn slint_shared_string_from_bytes(
         out: *mut SharedString,
@@ -558,8 +558,21 @@ pub(crate) mod ffi {
         len: usize,
     ) {
         unsafe {
-            let str = core::str::from_utf8(core::slice::from_raw_parts(bytes, len)).unwrap();
+            let str = if len == 0 {
+                ""
+            } else {
+                core::str::from_utf8(core::slice::from_raw_parts(bytes, len)).unwrap()
+            };
             core::ptr::write(out, SharedString::from(str));
+        }
+    }
+
+    #[test]
+    fn test_slint_shared_string_from_empty_null_bytes() {
+        unsafe {
+            let mut value = core::mem::MaybeUninit::uninit();
+            slint_shared_string_from_bytes(value.as_mut_ptr(), core::ptr::null(), 0);
+            assert_eq!(value.assume_init().as_str(), "");
         }
     }
 
@@ -735,16 +748,31 @@ pub(crate) mod ffi {
 
     /// Append some bytes to an existing shared string
     ///
-    /// bytes must be a valid utf8 array of size `len`, without null bytes inside
+    /// When `len` is non-zero, `bytes` must point to a valid UTF-8 array of size
+    /// `len`, without null bytes inside.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_shared_string_append(
         self_: &mut SharedString,
         bytes: *const c_char,
         len: usize,
     ) {
-        let str = core::str::from_utf8(unsafe { core::slice::from_raw_parts(bytes, len) }).unwrap();
+        let str = if len == 0 {
+            ""
+        } else {
+            core::str::from_utf8(unsafe { core::slice::from_raw_parts(bytes, len) }).unwrap()
+        };
         self_.push_str(str);
     }
+
+    #[test]
+    fn test_slint_shared_string_append_empty_null_bytes() {
+        let mut value = SharedString::from("value");
+        unsafe {
+            slint_shared_string_append(&mut value, core::ptr::null(), 0);
+        }
+        assert_eq!(value.as_str(), "value");
+    }
+
     #[test]
     fn test_slint_shared_string_append() {
         let mut s = SharedString::default();
