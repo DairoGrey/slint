@@ -59,6 +59,8 @@ mod text;
 pub use text::*;
 mod input_items;
 pub use input_items::*;
+mod external_text_input;
+pub use external_text_input::*;
 mod image;
 pub use self::image::*;
 mod render_surface;
@@ -228,6 +230,9 @@ pub type ItemRef<'a> = vtable::VRef<'a, ItemVTable>;
 
 declare_item_vtable! {
     fn slint_get_RenderSurfaceItemVTable() -> RenderSurfaceItemVTable for render_surface::RenderSurfaceItem
+}
+declare_item_vtable! {
+    fn slint_get_ExternalTextInputItemVTable() -> ExternalTextInputItemVTable for external_text_input::ExternalTextInputItem
 }
 
 #[repr(C)]
