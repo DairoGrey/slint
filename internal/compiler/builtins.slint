@@ -882,7 +882,7 @@ export component RenderSurfaceItem {
 
 /// Platform input-method and clipboard bridge for an externally owned text
 /// model. The item never stores or renders the document itself.
-export component ExternalTextInputItem {
+export component TextInputBridgeItem {
     in property <bool> enabled: true;
     out property <bool> has-focus;
     in property <bool> focus-on-click: true;
@@ -905,6 +905,10 @@ export component ExternalTextInputItem {
     out property <int> clipboard-written-generation;
     callback key-pressed(event: KeyEvent) -> EventResult;
     callback key-released(event: KeyEvent) -> EventResult;
+    /// Emitted for validated printable key text after `key-pressed` rejects
+    /// the event. Modifier keys, control characters, private-use key codes,
+    /// and IME composition commits are excluded.
+    callback text-input(text: string);
     callback preedit-updated(text: string);
     callback composition-committed(text: string);
     callback composition-cancelled();

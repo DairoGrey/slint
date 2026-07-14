@@ -423,7 +423,7 @@ fn gen_corelib(
         "ClippedImage",
         "TouchArea",
         "RenderSurfaceItem",
-        "ExternalTextInputItem",
+        "TextInputBridgeItem",
         "TooltipArea",
         "FocusScope",
         "KeyBinding",

@@ -59,8 +59,8 @@ mod text;
 pub use text::*;
 mod input_items;
 pub use input_items::*;
-mod external_text_input;
-pub use external_text_input::*;
+mod text_input_bridge;
+pub use text_input_bridge::*;
 mod image;
 pub use self::image::*;
 mod render_surface;
@@ -232,7 +232,7 @@ declare_item_vtable! {
     fn slint_get_RenderSurfaceItemVTable() -> RenderSurfaceItemVTable for render_surface::RenderSurfaceItem
 }
 declare_item_vtable! {
-    fn slint_get_ExternalTextInputItemVTable() -> ExternalTextInputItemVTable for external_text_input::ExternalTextInputItem
+    fn slint_get_TextInputBridgeItemVTable() -> TextInputBridgeItemVTable for text_input_bridge::TextInputBridgeItem
 }
 
 #[repr(C)]
