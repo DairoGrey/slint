@@ -23,7 +23,7 @@ use i_slint_core_macros::*;
 #[derive(FieldOffsets, Default, SlintElement)]
 #[pin]
 /// Focus and platform IME bridge for text stored outside Slint.
-pub struct ExternalTextInputItem {
+pub struct TextInputBridgeItem {
     pub enabled: Property<bool>,
     pub has_focus: Property<bool>,
     pub focus_on_click: Property<bool>,
@@ -46,6 +46,7 @@ pub struct ExternalTextInputItem {
     pub clipboard_written_generation: Property<i32>,
     pub key_pressed: Callback<KeyEventArg, EventResult>,
     pub key_released: Callback<KeyEventArg, EventResult>,
+    pub text_input: Callback<StringArg>,
     pub preedit_updated: Callback<StringArg>,
     pub composition_committed: Callback<StringArg>,
     pub composition_cancelled: Callback<VoidArg>,
@@ -58,7 +59,23 @@ pub struct ExternalTextInputItem {
     last_clipboard_generation: Cell<i32>,
 }
 
-impl ExternalTextInputItem {
+impl TextInputBridgeItem {
+    fn is_printable_key_text(event: &InternalKeyEvent) -> bool {
+        let modifiers = event.key_event.modifiers;
+        if modifiers.control || modifiers.alt || modifiers.meta {
+            return false;
+        }
+        !event.key_event.text.is_empty()
+            && event.key_event.text.chars().all(|ch| {
+                !ch.is_control()
+                    && ch != '\u{fffd}'
+                    && !matches!(ch,
+                        '\u{e000}'..='\u{f8ff}'
+                        | '\u{f0000}'..='\u{ffffd}'
+                        | '\u{100000}'..='\u{10fffd}')
+            })
+    }
+
     fn dispatch_preedit(self: Pin<&Self>, event: &InternalKeyEvent) {
         self.event_input_generation.set(self.input_generation());
         let replacement = event.replacement_range.clone().unwrap_or(0..0);
@@ -127,7 +144,7 @@ impl ExternalTextInputItem {
     }
 }
 
-impl Item for ExternalTextInputItem {
+impl Item for TextInputBridgeItem {
     fn init(self: Pin<&Self>, _self_rc: &ItemRc) {
         self.last_input_generation.set(i32::MIN);
         self.last_clipboard_generation.set(i32::MIN);
@@ -199,6 +216,10 @@ impl Item for ExternalTextInputItem {
                 }
                 match self.key_pressed.call(&(event.key_event.clone(),)) {
                     EventResult::Accept => KeyEventResult::EventAccepted,
+                    EventResult::Reject if Self::is_printable_key_text(event) => {
+                        self.text_input.call(&(event.key_event.text.clone(),));
+                        KeyEventResult::EventAccepted
+                    }
                     EventResult::Reject => KeyEventResult::EventIgnored,
                 }
             }
@@ -269,10 +290,10 @@ impl Item for ExternalTextInputItem {
     fn clips_children(self: Pin<&Self>) -> bool { false }
 }
 
-impl ItemConsts for ExternalTextInputItem {
+impl ItemConsts for TextInputBridgeItem {
     const cached_rendering_data_offset: const_field_offset::FieldOffset<
-        ExternalTextInputItem, CachedRenderingData,
-    > = ExternalTextInputItem::FIELD_OFFSETS.cached_rendering_data().as_unpinned_projection();
+        TextInputBridgeItem, CachedRenderingData,
+    > = TextInputBridgeItem::FIELD_OFFSETS.cached_rendering_data().as_unpinned_projection();
 }
 
 #[cfg(test)]
@@ -284,7 +305,7 @@ mod tests {
 
     #[test]
     fn preedit_and_commit_keep_external_ranges() {
-        let item = Box::pin(ExternalTextInputItem::default());
+        let item = Box::pin(TextInputBridgeItem::default());
         let preedit = Rc::new(RefCell::new(SharedString::default()));
         let observed = preedit.clone();
         item.preedit_updated.set_handler(move |(text,)| *observed.borrow_mut() = text.clone());
@@ -315,7 +336,7 @@ mod tests {
 
     #[test]
     fn empty_preedit_cancels_without_commit() {
-        let item = Box::pin(ExternalTextInputItem::default());
+        let item = Box::pin(TextInputBridgeItem::default());
         let cancelled = Rc::new(Cell::new(false));
         let observed = cancelled.clone();
         item.composition_cancelled.set_handler(move |()| observed.set(true));
@@ -324,5 +345,28 @@ mod tests {
             ..Default::default()
         });
         assert!(cancelled.get());
+    }
+
+    #[test]
+    fn printable_key_text_excludes_modifiers_and_platform_key_codes() {
+        let event = |text: &str, modifiers| {
+            let mut event = InternalKeyEvent::default();
+            event.key_event.text = text.into();
+            event.key_event.modifiers = modifiers;
+            event
+        };
+
+        assert!(TextInputBridgeItem::is_printable_key_text(&event(
+            "界", Default::default())));
+        assert!(TextInputBridgeItem::is_printable_key_text(&event(
+            "A", crate::input::KeyboardModifiers { shift: true, ..Default::default() })));
+        assert!(!TextInputBridgeItem::is_printable_key_text(&event(
+            "\u{f700}", Default::default())));
+        assert!(!TextInputBridgeItem::is_printable_key_text(&event(
+            "\u{fffd}", Default::default())));
+        assert!(!TextInputBridgeItem::is_printable_key_text(&event(
+            "x", crate::input::KeyboardModifiers { meta: true, ..Default::default() })));
+        assert!(!TextInputBridgeItem::is_printable_key_text(&event(
+            "\n", Default::default())));
     }
 }
