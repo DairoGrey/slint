@@ -23,7 +23,7 @@ use i_slint_core_macros::*;
 #[derive(FieldOffsets, Default, SlintElement)]
 #[pin]
 /// Focus and platform IME bridge for text stored outside Slint.
-pub struct TextInputBridgeItem {
+pub struct OverlayTextInputItem {
     pub enabled: Property<bool>,
     pub has_focus: Property<bool>,
     pub focus_on_click: Property<bool>,
@@ -56,10 +56,18 @@ pub struct TextInputBridgeItem {
     pub paste_received: Callback<StringArg>,
     pub cached_rendering_data: CachedRenderingData,
     last_input_generation: Cell<i32>,
+    last_surrounding_text: Property<SharedString>,
+    last_preedit_text: Property<SharedString>,
+    last_cursor_offset: Cell<i32>,
+    last_anchor_offset: Cell<i32>,
+    last_caret_x: Cell<f32>,
+    last_caret_y: Cell<f32>,
+    last_caret_width: Cell<f32>,
+    last_caret_height: Cell<f32>,
     last_clipboard_generation: Cell<i32>,
 }
 
-impl TextInputBridgeItem {
+impl OverlayTextInputItem {
     fn is_printable_key_text(event: &InternalKeyEvent) -> bool {
         let modifiers = event.key_event.modifiers;
         if modifiers.control || modifiers.alt || modifiers.meta {
@@ -134,19 +142,56 @@ impl TextInputBridgeItem {
         }
     }
 
-    fn update_input_method(self: Pin<&Self>, window_adapter: &WindowAdapterRc, self_rc: &ItemRc) {
-        if !self.has_focus() || !self.enabled() { return; }
+    fn effective_input_state_changed(self: Pin<&Self>) -> bool {
         let generation = self.input_generation();
-        if self.last_input_generation.replace(generation) == generation { return; }
+        let surrounding = self.surrounding_text();
+        let preedit = self.preedit_text();
+        let cursor = self.cursor_offset();
+        let anchor = self.anchor_offset();
+        let caret_x = self.caret_x().get();
+        let caret_y = self.caret_y().get();
+        let caret_width = self.caret_width().get();
+        let caret_height = self.caret_height().get();
+        let mut changed = self.last_input_generation.replace(generation) != generation;
+        changed |= self.last_surrounding_text() != surrounding;
+        changed |= self.last_preedit_text() != preedit;
+        changed |= self.last_cursor_offset.replace(cursor) != cursor;
+        changed |= self.last_anchor_offset.replace(anchor) != anchor;
+        // A candidate rectangle matters while an IME composition is active.
+        // Polling it unconditionally made every smooth-scroll render send a
+        // synchronous platform input-method update even though no candidate
+        // window existed. Keep the cached geometry current, but only make a
+        // geometry-only change observable while preedit is active. A later
+        // preedit/content change still sends the then-current rectangle.
+        let geometry_changed = self.last_caret_x.replace(caret_x) != caret_x
+            || self.last_caret_y.replace(caret_y) != caret_y
+            || self.last_caret_width.replace(caret_width) != caret_width
+            || self.last_caret_height.replace(caret_height) != caret_height;
+        changed |= !preedit.is_empty() && geometry_changed;
+        if changed {
+            self.last_surrounding_text.set(surrounding);
+            self.last_preedit_text.set(preedit);
+        }
+        changed
+    }
+
+    fn update_input_method(self: Pin<&Self>, window_adapter: &WindowAdapterRc, self_rc: &ItemRc) {
+        if !self.has_focus() || !self.enabled() || !self.effective_input_state_changed() { return; }
         if let Some(window) = window_adapter.internal(crate::InternalToken) {
             window.input_method_request(InputMethodRequest::Update(self.ime_properties(self_rc)));
         }
     }
 }
 
-impl Item for TextInputBridgeItem {
+impl Item for OverlayTextInputItem {
     fn init(self: Pin<&Self>, _self_rc: &ItemRc) {
         self.last_input_generation.set(i32::MIN);
+        self.last_cursor_offset.set(i32::MIN);
+        self.last_anchor_offset.set(i32::MIN);
+        self.last_caret_x.set(f32::NAN);
+        self.last_caret_y.set(f32::NAN);
+        self.last_caret_width.set(f32::NAN);
+        self.last_caret_height.set(f32::NAN);
         self.last_clipboard_generation.set(i32::MIN);
     }
 
@@ -290,10 +335,10 @@ impl Item for TextInputBridgeItem {
     fn clips_children(self: Pin<&Self>) -> bool { false }
 }
 
-impl ItemConsts for TextInputBridgeItem {
+impl ItemConsts for OverlayTextInputItem {
     const cached_rendering_data_offset: const_field_offset::FieldOffset<
-        TextInputBridgeItem, CachedRenderingData,
-    > = TextInputBridgeItem::FIELD_OFFSETS.cached_rendering_data().as_unpinned_projection();
+        OverlayTextInputItem, CachedRenderingData,
+    > = OverlayTextInputItem::FIELD_OFFSETS.cached_rendering_data().as_unpinned_projection();
 }
 
 #[cfg(test)]
@@ -305,7 +350,7 @@ mod tests {
 
     #[test]
     fn preedit_and_commit_keep_external_ranges() {
-        let item = Box::pin(TextInputBridgeItem::default());
+        let item = Box::pin(OverlayTextInputItem::default());
         let preedit = Rc::new(RefCell::new(SharedString::default()));
         let observed = preedit.clone();
         item.preedit_updated.set_handler(move |(text,)| *observed.borrow_mut() = text.clone());
@@ -336,7 +381,7 @@ mod tests {
 
     #[test]
     fn empty_preedit_cancels_without_commit() {
-        let item = Box::pin(TextInputBridgeItem::default());
+        let item = Box::pin(OverlayTextInputItem::default());
         let cancelled = Rc::new(Cell::new(false));
         let observed = cancelled.clone();
         item.composition_cancelled.set_handler(move |()| observed.set(true));
@@ -356,17 +401,32 @@ mod tests {
             event
         };
 
-        assert!(TextInputBridgeItem::is_printable_key_text(&event(
+        assert!(OverlayTextInputItem::is_printable_key_text(&event(
             "界", Default::default())));
-        assert!(TextInputBridgeItem::is_printable_key_text(&event(
+        assert!(OverlayTextInputItem::is_printable_key_text(&event(
             "A", crate::input::KeyboardModifiers { shift: true, ..Default::default() })));
-        assert!(!TextInputBridgeItem::is_printable_key_text(&event(
+        assert!(!OverlayTextInputItem::is_printable_key_text(&event(
             "\u{f700}", Default::default())));
-        assert!(!TextInputBridgeItem::is_printable_key_text(&event(
+        assert!(!OverlayTextInputItem::is_printable_key_text(&event(
             "\u{fffd}", Default::default())));
-        assert!(!TextInputBridgeItem::is_printable_key_text(&event(
+        assert!(!OverlayTextInputItem::is_printable_key_text(&event(
             "x", crate::input::KeyboardModifiers { meta: true, ..Default::default() })));
-        assert!(!TextInputBridgeItem::is_printable_key_text(&event(
+        assert!(!OverlayTextInputItem::is_printable_key_text(&event(
             "\n", Default::default())));
+    }
+
+    #[test]
+    fn candidate_geometry_updates_only_while_composition_is_active() {
+        let item = Box::pin(OverlayTextInputItem::default());
+        assert!(!item.as_ref().effective_input_state_changed());
+        item.caret_y.set(LogicalLength::new(24.));
+        assert!(!item.as_ref().effective_input_state_changed());
+        item.preedit_text.set("compose".into());
+        assert!(item.as_ref().effective_input_state_changed());
+        item.caret_y.set(LogicalLength::new(48.));
+        assert!(item.as_ref().effective_input_state_changed());
+        assert!(!item.as_ref().effective_input_state_changed());
+        item.surrounding_text.set("context".into());
+        assert!(item.as_ref().effective_input_state_changed());
     }
 }

@@ -232,7 +232,7 @@ declare_item_vtable! {
     fn slint_get_RenderSurfaceItemVTable() -> RenderSurfaceItemVTable for render_surface::RenderSurfaceItem
 }
 declare_item_vtable! {
-    fn slint_get_TextInputBridgeItemVTable() -> TextInputBridgeItemVTable for text_input_bridge::TextInputBridgeItem
+    fn slint_get_OverlayTextInputItemVTable() -> OverlayTextInputItemVTable for text_input_bridge::OverlayTextInputItem
 }
 
 #[repr(C)]
