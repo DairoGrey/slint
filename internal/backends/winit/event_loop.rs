@@ -35,6 +35,33 @@ fn winit_touch_phase(phase: winit::event::TouchPhase) -> corelib::input::TouchPh
         winit::event::TouchPhase::Cancelled => corelib::input::TouchPhase::Cancelled,
     }
 }
+
+fn winit_key_to_slint_text(
+    key_code: &Key,
+    event_text: Option<&str>,
+    location: winit::keyboard::KeyLocation,
+) -> SharedString {
+    macro_rules! winit_key_to_char {
+        ($($char:literal # $name:ident # $($shifted:ident)? $(=> $($_muda:ident)? # $($_qt:ident)|* # $($winit:ident $(($pos:ident))?)|* # $($_xkb:ident)|* )? ;)*) => {
+            #[cfg_attr(slint_nightly_test, allow(non_exhaustive_omitted_patterns))]
+            match key_code {
+                $( $( $(
+                            winit::keyboard::Key::Named(winit::keyboard::NamedKey::$winit)
+                            $(if location == winit::keyboard::KeyLocation::$pos)?
+                            => $char.into(),
+                )* )? )*
+                    winit::keyboard::Key::Character(str) => str.as_str().into(),
+                    _ => event_text.unwrap_or_default().into(),
+            }
+        }
+    }
+    i_slint_common::for_each_keys!(winit_key_to_char)
+}
+
+fn should_forward_synthetic_key(key_code: &Key) -> bool {
+    use winit::keyboard::{Key::Named, NamedKey as N};
+    matches!(key_code, Named(N::Control | N::Shift | N::Super | N::Alt | N::AltGraph))
+}
 use winit::event_loop::ControlFlow;
 use winit::window::ResizeDirection;
 
@@ -139,6 +166,43 @@ impl EventLoopState {
             let runtime_window = WindowInner::from_pub(window.window());
             runtime_window.process_mouse_input(MouseEvent::Moved { position, touch_finger_id: 0 });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use corelib::input::key_codes::Key as SlintKey;
+    use winit::keyboard::{KeyLocation, NamedKey};
+
+    #[test]
+    fn translates_platform_modifier_and_text_keys_without_replacement_glyphs() {
+        let standard = KeyLocation::Standard;
+        assert_eq!(
+            winit_key_to_slint_text(&Key::Named(NamedKey::AltGraph), None, standard),
+            SharedString::from(SlintKey::AltGr),
+        );
+        assert_eq!(
+            winit_key_to_slint_text(&Key::Named(NamedKey::Super), None, KeyLocation::Left),
+            SharedString::from(SlintKey::Meta),
+        );
+        assert_eq!(
+            winit_key_to_slint_text(&Key::Named(NamedKey::Space), None, standard),
+            SharedString::from(" "),
+        );
+        assert_eq!(
+            winit_key_to_slint_text(&Key::Character("€".into()), Some("\u{fffd}"), standard),
+            SharedString::from("€"),
+        );
+    }
+
+    #[test]
+    fn synthetic_focus_events_forward_modifiers_only() {
+        assert!(should_forward_synthetic_key(&Key::Named(NamedKey::AltGraph)));
+        assert!(should_forward_synthetic_key(&Key::Named(NamedKey::Super)));
+        assert!(should_forward_synthetic_key(&Key::Named(NamedKey::Shift)));
+        assert!(!should_forward_synthetic_key(&Key::Named(NamedKey::Space)));
+        assert!(!should_forward_synthetic_key(&Key::Character("x".into())));
     }
 }
 
@@ -274,31 +338,12 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
                     key_code
                 };
 
-                fn to_slint_key(event: &winit::event::KeyEvent, key_code: &Key) -> SharedString {
-                    macro_rules! winit_key_to_char {
-                        ($($char:literal # $name:ident # $($shifted:ident)? $(=> $($_muda:ident)? # $($_qt:ident)|* # $($winit:ident $(($pos:ident))?)|* # $($_xkb:ident)|* )? ;)*) => {
-                            #[cfg_attr(slint_nightly_test, allow(non_exhaustive_omitted_patterns))]
-                            match key_code {
-                                $( $( $(
-                                            winit::keyboard::Key::Named(winit::keyboard::NamedKey::$winit)
-                                            $(if event.location == winit::keyboard::KeyLocation::$pos)?
-                                            => $char.into(),
-                                )* )? )*
-                                    winit::keyboard::Key::Character(str) => str.as_str().into(),
-                                _ => {
-                                    if let Some(text) = &event.text {
-                                        text.as_str().into()
-                                    } else {
-                                        "".into()
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    i_slint_common::for_each_keys!(winit_key_to_char)
-                }
                 #[allow(unused_mut)]
-                let mut text = to_slint_key(&event, &key_code);
+                let mut text = winit_key_to_slint_text(
+                    &key_code,
+                    event.text.as_ref().map(|text| text.as_str()),
+                    event.location,
+                );
 
                 #[cfg(target_os = "windows")]
                 let text_without_modifiers = {
@@ -313,8 +358,11 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
                     // The text_without_modifiers also let's us disambiguate between a Ctrl+Alt
                     // combination used to imply AltGr or not.
                     // The latter case should be treated as a shortcut, the former should not.
-                    let text_without_modifiers =
-                        to_slint_key(&event, &event.key_without_modifiers());
+                    let text_without_modifiers = winit_key_to_slint_text(
+                        &event.key_without_modifiers(),
+                        event.text.as_ref().map(|text| text.as_str()),
+                        event.location,
+                    );
                     if text.is_empty() && !text_without_modifiers.is_empty() {
                         text = text_without_modifiers.clone();
                     }
@@ -329,11 +377,7 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
                 if is_synthetic {
                     // Synthetic event are sent when the focus is acquired, for all the keys currently pressed.
                     // Don't forward these keys other than modifiers to the app
-                    use winit::keyboard::{Key::Named, NamedKey as N};
-                    if !matches!(
-                        key_code,
-                        Named(N::Control | N::Shift | N::Super | N::Alt | N::AltGraph),
-                    ) {
+                    if !should_forward_synthetic_key(&key_code) {
                         return;
                     }
                 }

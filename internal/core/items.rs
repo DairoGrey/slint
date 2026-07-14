@@ -59,8 +59,8 @@ mod text;
 pub use text::*;
 mod input_items;
 pub use input_items::*;
-mod text_input_bridge;
-pub use text_input_bridge::*;
+mod overlay_text_input;
+pub use overlay_text_input::*;
 mod image;
 pub use self::image::*;
 mod render_surface;
@@ -232,7 +232,7 @@ declare_item_vtable! {
     fn slint_get_RenderSurfaceItemVTable() -> RenderSurfaceItemVTable for render_surface::RenderSurfaceItem
 }
 declare_item_vtable! {
-    fn slint_get_OverlayTextInputItemVTable() -> OverlayTextInputItemVTable for text_input_bridge::OverlayTextInputItem
+    fn slint_get_OverlayTextInputItemVTable() -> OverlayTextInputItemVTable for overlay_text_input::OverlayTextInputItem
 }
 
 #[repr(C)]
