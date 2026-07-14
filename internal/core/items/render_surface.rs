@@ -13,6 +13,8 @@ use crate::input::{InternalKeyEvent, MouseEvent};
 use crate::item_rendering::CachedRenderingData;
 use crate::layout::LayoutInfo;
 use crate::lengths::PointLengths;
+#[cfg(feature = "rtti")]
+use crate::rtti::*;
 use crate::window::WindowAdapterRc;
 use crate::{Callback, Coord, Property};
 use const_field_offset::FieldOffsets;
