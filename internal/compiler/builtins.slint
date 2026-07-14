@@ -894,8 +894,12 @@ export component OverlayTextInputItem {
     in property <length> caret-y;
     in property <length> caret-width: 1px;
     in property <length> caret-height: 1px;
+    /// Monotonic identity of the surrounding input state. Composition events
+    /// are tagged with the last generation submitted to the platform.
     in property <int> input-generation;
     in property <string> clipboard-write-text;
+    /// Monotonically increasing clipboard handoff identity. Acknowledgement
+    /// means that the text was handed to the platform clipboard API.
     in property <int> clipboard-write-generation: -1;
     out property <int> event-input-generation: -1;
     out property <int> replacement-start;
