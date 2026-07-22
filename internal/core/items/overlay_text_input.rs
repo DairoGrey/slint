@@ -6,8 +6,8 @@
 use super::{
     EventResult, FocusEvent, FocusEventResult, FocusReason, InputEventFilterResult,
     InputEventResult, Item, ItemConsts, ItemRc, ItemRendererRef, KeyEventArg, KeyEventResult,
-    LayoutInfo, LogicalLength, LogicalRect, LogicalSize, MouseCursor, RenderingResult, StringArg,
-    VoidArg,
+    LayoutInfo, LogicalLength, LogicalRect, LogicalSize, MouseCursorInner, RenderingResult,
+    StringArg, VoidArg,
 };
 use crate::input::{InternalKeyEvent, KeyEventType, MouseEvent, StandardShortcut};
 use crate::item_rendering::CachedRenderingData;
@@ -30,6 +30,7 @@ pub struct OverlayTextInputItem {
     pub enabled: Property<bool>,
     pub has_focus: Property<bool>,
     pub focus_on_click: Property<bool>,
+    pub input_method_hints: Property<super::InputMethodHints>,
     pub surrounding_text: Property<SharedString>,
     pub cursor_offset: Property<i32>,
     pub anchor_offset: Property<i32>,
@@ -181,6 +182,7 @@ impl OverlayTextInputItem {
                 cursor_origin.y + cursor_size.height,
             ),
             input_type: super::InputType::Text,
+            input_method_hints: self.input_method_hints(),
             clip_rect,
         }
     }
@@ -359,7 +361,7 @@ impl Item for OverlayTextInputItem {
         _event: &MouseEvent,
         _window_adapter: &WindowAdapterRc,
         _self_rc: &ItemRc,
-        _cursor: &mut MouseCursor,
+        _cursor: &mut MouseCursorInner,
     ) -> InputEventFilterResult {
         InputEventFilterResult::ForwardEvent
     }
@@ -369,7 +371,7 @@ impl Item for OverlayTextInputItem {
         event: &MouseEvent,
         window_adapter: &WindowAdapterRc,
         self_rc: &ItemRc,
-        _cursor: &mut MouseCursor,
+        _cursor: &mut MouseCursorInner,
     ) -> InputEventResult {
         if self.enabled()
             && self.focus_on_click()

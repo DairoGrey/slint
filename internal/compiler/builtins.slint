@@ -886,6 +886,8 @@ export component OverlayTextInputItem {
     in property <bool> enabled: true;
     out property <bool> has-focus;
     in property <bool> focus-on-click: true;
+    /// Hints for the platform input method used by the external text model.
+    in property <InputMethodHints> input-method-hints;
     in property <string> surrounding-text;
     in property <int> cursor-offset;
     in property <int> anchor-offset;

@@ -6,7 +6,7 @@
 use super::{
     EventResult, FocusEvent, FocusEventResult, InputEventFilterResult, InputEventResult, Item,
     ItemConsts, ItemRc, ItemRendererRef, KeyEventResult, LogicalLength, LogicalRect, LogicalSize,
-    MouseCursor, PointerEvent, PointerEventArg, PointerEventButton, PointerEventKind,
+    MouseCursorInner, PointerEvent, PointerEventArg, PointerEventButton, PointerEventKind,
     PointerScrollEvent, PointerScrollEventArg, RenderingResult,
 };
 use crate::input::{InternalKeyEvent, MouseEvent};
@@ -32,7 +32,7 @@ pub struct RenderSurfaceItem {
     pub content_offset_x: Property<LogicalLength>,
     pub content_offset_y: Property<LogicalLength>,
     pub enabled: Property<bool>,
-    pub mouse_cursor: Property<MouseCursor>,
+    pub mouse_cursor: Property<MouseCursorInner>,
     pub mouse_x: Property<LogicalLength>,
     pub mouse_y: Property<LogicalLength>,
     pub pointer_event: Callback<PointerEventArg>,
@@ -87,7 +87,7 @@ impl Item for RenderSurfaceItem {
         event: &MouseEvent,
         _window_adapter: &WindowAdapterRc,
         _self_rc: &ItemRc,
-        cursor: &mut MouseCursor,
+        cursor: &mut MouseCursorInner,
     ) -> InputEventFilterResult {
         if !self.enabled() || matches!(event, MouseEvent::DragMove { .. } | MouseEvent::Drop { .. })
         {
@@ -106,7 +106,7 @@ impl Item for RenderSurfaceItem {
         event: &MouseEvent,
         window_adapter: &WindowAdapterRc,
         _self_rc: &ItemRc,
-        _cursor: &mut MouseCursor,
+        _cursor: &mut MouseCursorInner,
     ) -> InputEventResult {
         if !self.enabled() {
             return InputEventResult::EventIgnored;
