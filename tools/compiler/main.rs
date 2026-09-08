@@ -8,6 +8,7 @@ use i_slint_compiler::*;
 use itertools::Itertools;
 use std::io::Cursor;
 use std::io::Write;
+use std::path::{Component, Path, PathBuf};
 
 #[cfg(all(
     feature = "jemalloc",
@@ -100,6 +101,11 @@ struct Cli {
     #[arg(short = 'o', name = "output file", default_value = "-")]
     output: std::path::PathBuf,
 
+    /// Write relative output and C++ file names below this explicit directory.
+    /// The relative spelling is retained for generated sibling includes.
+    #[arg(long = "output-directory", name = "directory")]
+    output_directory: Option<std::path::PathBuf>,
+
     /// Set the translation domain for translatable strings.
     /// This is used to manage translation of strings in the UI.
     #[arg(long = "translation-domain")]
@@ -133,9 +139,34 @@ struct Cli {
     cpp_files: Vec<std::path::PathBuf>,
 }
 
+fn is_normal_relative_output(path: &Path) -> bool {
+    !path.as_os_str().is_empty()
+        && path.components().all(|component| matches!(component, Component::Normal(_)))
+}
+
+fn physical_output_path(directory: Option<&Path>, path: &Path, option: &str) -> PathBuf {
+    let Some(directory) = directory else { return path.to_owned() };
+    if !is_normal_relative_output(path) {
+        eprintln!("{option} must be a non-empty normalized relative path with --output-directory");
+        std::process::exit(2);
+    }
+    directory.join(path)
+}
+
 fn main() -> std::io::Result<()> {
     proc_macro2::fallback::force(); // avoid a abort if panic=abort is set
     let args = Cli::parse();
+    if args.output_directory.is_some() && args.output == Path::new("-") {
+        eprintln!("--output-directory requires an explicit -o output file");
+        std::process::exit(2);
+    }
+    let physical_output =
+        physical_output_path(args.output_directory.as_deref(), &args.output, "-o");
+    let physical_cpp_files: Vec<_> = args
+        .cpp_files
+        .iter()
+        .map(|path| physical_output_path(args.output_directory.as_deref(), path, "--cpp-file"))
+        .collect();
     let mut diag = BuildDiagnostics::default();
     let syntax_node = parser::parse_file(&args.path, &mut diag);
     //println!("{:#?}", syntax_node);
@@ -208,7 +239,7 @@ fn main() -> std::io::Result<()> {
     if !args.cpp_files.is_empty() {
         match &mut format {
             generator::OutputFormat::Cpp(config) => {
-                config.cpp_files = args.cpp_files;
+                config.cpp_files = physical_cpp_files;
 
                 if args.output == std::path::Path::new("-") {
                     eprintln!("--cpp-file can only be used together with -o");
@@ -275,13 +306,13 @@ fn main() -> std::io::Result<()> {
         generator::generate(
             format,
             &mut cursor,
-            Some(&args.output),
+            Some(&physical_output),
             &doc,
             &loader.compiler_config,
         )?;
         // Important: Write without unnecessary mtime modification to avoid
         // build systems to always detect the generated file as modified.
-        fileaccess::write_file_if_changed(&args.output, &cursor.into_inner())?;
+        fileaccess::write_file_if_changed(&physical_output, &cursor.into_inner())?;
     }
 
     if let Some(depfile) = args.depfile {
