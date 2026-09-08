@@ -36,12 +36,12 @@ members = [
   'bevy/slint-hosts-bevy',
   'bevy/bevy-hosts-slint',
   'bevy/bevy-hosts-slint-gpu',
-  'servo',
 ]
 
-# These keep their own workspace (custom MCU profile, no host build, or
-# conflicting board-HAL riscv-rt versions) and are built separately in CI.
-exclude = ['safe-ui', 'mcu-board-support', 'mcu-embassy', 'uefi-demo']
+# These keep their own workspace (custom MCU profile, no host build,
+# conflicting board-HAL riscv-rt versions, or - for servo - a conflicting
+# native `links` dependency) and are built separately in CI.
+exclude = ['safe-ui', 'mcu-board-support', 'mcu-embassy', 'uefi-demo', 'servo']
 
 resolver = "3"
 
@@ -71,24 +71,3 @@ derive_more = { version = "2.0.0", default-features = false, features = ["deref"
 glow = { version = "0.17" }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 wgpu-30 = { package = "wgpu", version = "30", default-features = false }
-
-# WARNING: keep every `[profile.*]` setting below identical to the root
-# workspace's Cargo.toml. cargo keys its build cache on the profile, so any
-# divergence makes the shared `target/` directory (see `.cargo/config.toml`)
-# rebuild the common library crates for this workspace instead of reusing them.
-[profile.release]
-panic = "abort"
-
-[profile.dev]
-panic = "abort"
-
-# Always build resvg and its hot-path dependencies with optimizations,
-# as it otherwise causes freezes to load large SVGs in debug builds.
-[profile.dev.package.resvg]
-opt-level = 3
-[profile.dev.package.usvg]
-opt-level = 3
-[profile.dev.package.tiny-skia]
-opt-level = 3
-[profile.dev.package.rgb]
-opt-level = 3

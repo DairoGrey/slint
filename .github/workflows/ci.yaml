@@ -38,6 +38,8 @@ on:
           required: true
         READ_WRITE_PRIVATE_KEY:
           required: true
+        SLINT_TESTING_TOKEN:
+          required: true
 
 env:
     MACOSX_DEPLOYMENT_TARGET: "11.0"
@@ -77,6 +79,52 @@ jobs:
             test_rust_driver: ${{ !startsWith(matrix.os, 'macos') || inputs.full || contains(fromJSON(inputs.changes), 'api_rs') || contains(fromJSON(inputs.changes), 'tests') || contains(fromJSON(inputs.changes), 'qt') }}
             build_examples: ${{ inputs.full || contains(fromJSON(inputs.changes), 'integration') || contains(fromJSON(inputs.changes), 'examples') }}
             save_if: ${{ github.ref == 'refs/heads/master' }}
+
+    visual_editor:
+        if: ${{ contains(fromJSON(inputs.changes), 'visual_editor') }}
+        name: Visual Editor
+        runs-on: macos-14
+        timeout-minutes: 120
+        env:
+            RUSTFLAGS: -D warnings
+            SLINT_EMIT_DEBUG_INFO: '1'
+            # The UI tests need a private package that GitHub doesn't hand the
+            # token for to pull requests from forks. Lint and build the editor
+            # there anyway, and skip only the steps that need the token.
+            UI_TESTS: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+        steps:
+            - uses: actions/checkout@v7
+            - uses: ./.github/actions/install-skia-dependencies
+            - uses: ./.github/actions/setup-rust
+              with:
+                  components: clippy
+                  key: x-visual-editor-v1
+                  save_if: ${{ github.ref == 'refs/heads/master' }}
+            - uses: actions/setup-python@v7
+              with:
+                  python-version: '3.11'
+            - uses: astral-sh/setup-uv@v7
+            - name: Install UI test dependencies
+              if: ${{ env.UI_TESTS == 'true' }}
+              working-directory: tools/editor/ui-tests
+              env:
+                  UV_INDEX: slint-private=https://testing.slint.dev/simple/
+                  UV_INDEX_SLINT_PRIVATE_USERNAME: __token__
+                  UV_INDEX_SLINT_PRIVATE_PASSWORD: ${{ secrets.SLINT_TESTING_TOKEN }}
+              run: uv sync --locked
+            - name: Lint the visual editor
+              run: cargo clippy --locked -p slint-editor --all-targets --all-features --features slint/mcp -- -D warnings
+            - name: Test the visual editor
+              run: cargo test --locked -p slint-editor --all-features --features slint/mcp
+            - name: Build the visual editor UI test binary
+              run: cargo build --locked -p slint-editor --all-features --features slint/mcp
+            - name: Run visual editor UI tests
+              if: ${{ env.UI_TESTS == 'true' }}
+              working-directory: tools/editor/ui-tests
+              env:
+                  SLINT_BACKEND: headless-skia
+                  SLINT_EDITOR_BINARY: ${{ github.workspace }}/target/debug/slint-editor
+              run: ./run-tests.sh
 
     # For changes to Slint internals, do a quick test on Linux for Node.js only.
     node_test_linux:
@@ -169,8 +217,8 @@ jobs:
             - name: Install 32-bit build dependencies
               run: |
                   sudo dpkg --add-architecture i386
-                  sudo timeout 300 apt-get update
-                  sudo timeout 300 apt-get install -y gcc-multilib g++-multilib libfontconfig-dev:i386
+                  sudo timeout 600 apt-get update
+                  sudo timeout 600 apt-get install -y gcc-multilib g++-multilib libfontconfig-dev:i386
             - uses: ./.github/actions/setup-rust
               with:
                   target: i686-unknown-linux-gnu
@@ -296,7 +344,7 @@ jobs:
         runs-on: ubuntu-22.04
         steps:
             - uses: actions/checkout@v7
-            - uses: pnpm/action-setup@v6.0.9
+            - uses: pnpm/action-setup@v6.0.10
             - uses: Swatinem/rust-cache@v2
               with:
                 key: "vsce_1" # increment this to bust the cache if needed
@@ -328,7 +376,10 @@ jobs:
     # Compile checks that need cross-compilation toolchains: the mcu backend
     # for no_std targets (ARM and ESP32) and the 32-bit ARM FFI build. They
     # share one job to keep the number of runners a PR occupies down; each
-    # step only runs when its own filter group matched.
+    # step only runs when its own filter group matched. The mcu-embassy
+    # simulator is checked here too, next to its mcu counterpart, even though
+    # it builds for the host; cargo check doesn't link, so it needs no
+    # system libraries.
     cross_compile_checks:
         if: ${{ inputs.full || contains(fromJSON(inputs.changes), 'internal') || contains(fromJSON(inputs.changes), 'examples_mcu') || contains(fromJSON(inputs.changes), 'api_rs') || contains(fromJSON(inputs.changes), 'api_cpp') }}
         env:
@@ -356,6 +407,13 @@ jobs:
               env:
                   RUSTFLAGS: --cfg slint_int_coord -D warnings
               run: cargo check --bin ui_mcu --target=thumbv8m.main-none-eabihf --no-default-features --features="mcu-embassy/mcu" --release
+              working-directory: examples/mcu-embassy
+            - name: Check mcu-embassy simulator
+              if: ${{ inputs.full || contains(fromJSON(inputs.changes), 'examples_mcu') || contains(fromJSON(inputs.changes), 'api_rs') }}
+              env:
+                  RUSTFLAGS: -D warnings
+              # Host target, overriding the embedded default target of this directory's .cargo/config.toml
+              run: cargo check --bin ui_simulator --target=x86_64-unknown-linux-gnu --no-default-features --features=simulator --release
               working-directory: examples/mcu-embassy
             - name: Check all boards
               if: ${{ inputs.full || contains(fromJSON(inputs.changes), 'examples_mcu') }}
@@ -469,7 +527,7 @@ jobs:
                   cd $IDF_PYTHON_ENV_PATH
                   bin/pip install pydantic==2.11.10
             - uses: actions/checkout@v7
-            - run: timeout 300 apt-get update && timeout 300 apt-get install -y libfontconfig1-dev
+            - run: timeout 600 apt-get update && timeout 600 apt-get install -y libfontconfig1-dev
             - uses: dtolnay/rust-toolchain@stable
             - uses: esp-rs/xtensa-toolchain@v1.7
               with:
@@ -550,6 +608,10 @@ jobs:
             - name: Build slint-viewer for Android
               run: cargo apk build -p slint-viewer --target aarch64-linux-android --lib --features remote
 
+    android_reproducible:
+        if: ${{ inputs.full }}
+        uses: ./.github/workflows/android_reproducible.yaml
+
     android_cpp:
         if: ${{ inputs.full || contains(fromJSON(inputs.changes), 'api_cpp') || contains(fromJSON(inputs.changes), 'examples') || contains(fromJSON(inputs.changes), 'android_backend') }}
         runs-on: ubuntu-latest
@@ -563,7 +625,7 @@ jobs:
               with:
                   distribution: temurin
                   java-version: '17'
-            - uses: gradle/actions/setup-gradle@v6
+            - uses: gradle/actions/setup-gradle@v6.3.0
             - name: Build usecases demo APK (Gradle end-to-end)
               working-directory: demos/usecases/cpp/android
               env:
@@ -580,7 +642,7 @@ jobs:
                 node-version: 24
                 package-manager-cache: false
               id: node-install
-            - uses: pnpm/action-setup@v6.0.9
+            - uses: pnpm/action-setup@v6.0.10
             - name: Run pnpm install
               working-directory: tools/figma-inspector
               run: pnpm install --frozen-lockfile
@@ -639,9 +701,9 @@ jobs:
             - uses: actions/checkout@v7
             - uses: ./.github/actions/install-linux-dependencies
             - name: Install ffmpeg and alsa (Linux)
-              run: sudo timeout 300 apt-get install clang libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev libavdevice-dev libasound2-dev pkg-config
+              run: sudo timeout 600 apt-get install clang libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev libavdevice-dev libasound2-dev pkg-config
             - name: Install gstreamer and libunwind (Linux)
-              run: sudo timeout 300 apt-get install libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good
+              run: sudo timeout 600 apt-get install libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good
             - uses: ./.github/actions/setup-rust
             - name: Run Clippy
               run: ./scripts/run_clippy.sh
@@ -692,7 +754,7 @@ jobs:
             # provides the unversioned tool names. nasm assembles aws-lc-sys' x86 assembly
             # (pulled in via rustls/aws-lc-rs, e.g. by the servo example and live-preview).
             - name: Install LLVM tools and nasm
-              run: sudo timeout 300 apt-get update && sudo timeout 300 apt-get install -y llvm nasm
+              run: sudo timeout 600 apt-get update && sudo timeout 600 apt-get install -y llvm nasm
             - uses: baptiste0928/cargo-install@v3
               with:
                   crate: cargo-xwin
@@ -715,7 +777,53 @@ jobs:
                   CFLAGS: -msse2
                   CXXFLAGS: -msse2
               # The excluded crates need a dedicated toolchain or don't cross-compile here.
-              run: cargo xwin build --target i686-pc-windows-msvc --locked --workspace --exclude slint-node --exclude slint-cpp --exclude slint-python --exclude slint-sc --exclude slint-doc-generator --exclude i-slint-renderer-skia
+              run: cargo xwin build --target i686-pc-windows-msvc --locked --workspace --exclude slint-node --exclude slint-cpp --exclude slint-python --exclude slint-sc --exclude slint-doc-generator --exclude i-slint-renderer-skia --exclude slint-editor
+
+    # `backend-linuxkms` is the bare backend and `compat-1-2` restores its pre-1.18
+    # meaning of libseat + libinput. Getting that implication wrong still compiles,
+    # it just silently changes what an application links against, so assert the
+    # resolution itself, from the CMake options down. `cargo tree` and CMake only, no
+    # compilation and no system libraries.
+    linuxkms_features:
+        if: ${{ inputs.full || contains(fromJSON(inputs.changes), 'slint') || contains(fromJSON(inputs.changes), 'api_rs') || contains(fromJSON(inputs.changes), 'api_cpp') }}
+        runs-on: ubuntu-24.04
+        steps:
+            - uses: actions/checkout@v7
+            - uses: ./.github/actions/setup-rust
+              with:
+                  key: x-linuxkms-features
+            - name: Check LinuxKMS feature resolution
+              run: ./api/cpp/tests/check_linuxkms_features.sh
+
+    # Compile the four combinations of the LinuxKMS backend's libseat and libinput
+    # features, to catch mistakes in their `#[cfg]` gating. That a combination really
+    # drops its dependencies is asserted by linuxkms_features above, which inspects the
+    # resolved dependency graph instead of relying on which packages a runner image
+    # happens to ship.
+    linuxkms_build_matrix:
+        if: ${{ inputs.full }}
+        runs-on: ubuntu-24.04
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - name: "minimal"
+                      features: "compat-1-18,backend-linuxkms,renderer-software"
+                    - name: "libseat"
+                      features: "compat-1-18,backend-linuxkms,backend-linuxkms-libseat,renderer-software"
+                    - name: "libinput"
+                      features: "compat-1-18,backend-linuxkms,backend-linuxkms-libinput,renderer-software"
+                    - name: "libseat + libinput"
+                      features: "compat-1-18,backend-linuxkms,backend-linuxkms-libseat,backend-linuxkms-libinput,renderer-software"
+        name: LinuxKMS ${{ matrix.name }}
+        steps:
+            - uses: actions/checkout@v7
+            - uses: ./.github/actions/install-linux-dependencies
+            - uses: ./.github/actions/setup-rust
+              with:
+                  key: x-linuxkms-${{ matrix.name }}
+            - name: Build
+              run: cargo build -p slint --no-default-features --features ${{ matrix.features }}
 
     qa-tree-sitter-latest:
         if: ${{ inputs.full }}
@@ -761,7 +869,7 @@ jobs:
                   wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
                   chmod +x /tmp/llvm.sh
                   sudo /tmp/llvm.sh 20
-                  sudo timeout 300 apt-get install --assume-yes libclang-20-dev
+                  sudo timeout 600 apt-get install --assume-yes libclang-20-dev
                   rm -f /tmp/llvm.sh
             - name: C++ Build
               run: |
@@ -773,7 +881,7 @@ jobs:
                   # runner's system libclang is too old for; use the one installed above.
                   export LIBCLANG_PATH=/usr/lib/llvm-20/lib
                   mkdir ${{ runner.workspace }}/cppbuild
-                  cmake -GNinja -B ${{ runner.workspace }}/cppbuild -S . -DRust_CARGO_TARGET=${{ matrix.target }} -DSLINT_BUILD_TESTING=ON -DSLINT_BUILD_EXAMPLES=ON -DCMAKE_BUILD_TYPE=Debug -DSLINT_FEATURE_RENDERER_SKIA=ON -DSLINT_FEATURE_BACKEND_QT=OFF -DSLINT_FEATURE_BACKEND_LINUXKMS=ON -DSLINT_FEATURE_INTERPRETER=ON
+                  cmake -GNinja -B ${{ runner.workspace }}/cppbuild -S . -DRust_CARGO_TARGET=${{ matrix.target }} -DSLINT_BUILD_TESTING=ON -DSLINT_BUILD_EXAMPLES=ON -DCMAKE_BUILD_TYPE=Debug -DSLINT_FEATURE_RENDERER_SKIA=ON -DSLINT_FEATURE_BACKEND_QT=OFF -DSLINT_FEATURE_BACKEND_LINUXKMS_LIBSEAT=ON -DSLINT_FEATURE_BACKEND_LINUXKMS_LIBINPUT=ON -DSLINT_FEATURE_INTERPRETER=ON
                   cmake --build ${{ runner.workspace }}/cppbuild
 
     mcu_zephyr:
@@ -988,7 +1096,7 @@ jobs:
         steps:
             - uses: actions/checkout@v7
             - name: Install system dependencies
-              run: sudo timeout 300 apt-get update && sudo timeout 300 apt-get install -y libfontconfig-dev
+              run: sudo timeout 600 apt-get update && sudo timeout 600 apt-get install -y libfontconfig-dev
             - uses: ./.github/actions/setup-rust
               with:
                   toolchain: nightly

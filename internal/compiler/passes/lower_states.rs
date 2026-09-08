@@ -7,34 +7,45 @@ use crate::diagnostics::BuildDiagnostics;
 use crate::diagnostics::SourceLocation;
 use crate::diagnostics::Spanned;
 use crate::expression_tree::*;
-use crate::langtype::ElementType;
-use crate::langtype::Type;
+use crate::langtype::{PropertyLookupMode, Type};
+use crate::object_tree::forward_inherited_expression::{
+    ForwardedReferenceCache, InheritedExpression, forward_inherited_expression,
+};
 use crate::object_tree::*;
+use crate::symbol_counters::SymbolCounters;
 use smol_str::SmolStr;
 use std::collections::{HashMap, HashSet};
-use std::rc::{Rc, Weak};
+use std::rc::Rc;
 
-pub fn lower_states(component: &Rc<Component>, diag: &mut BuildDiagnostics) {
+pub fn lower_states(
+    component: &Rc<Component>,
+    symbol_counters: &SymbolCounters,
+    forwarded_references: &mut ForwardedReferenceCache,
+    diag: &mut BuildDiagnostics,
+) {
     let state_info_type = crate::typeregister::BUILTIN.state_info_type.clone().into();
     recurse_elem(&component.root_element, &(), &mut |elem, _| {
-        lower_state_in_element(elem, &state_info_type, diag)
+        lower_state_in_element(elem, &state_info_type, symbol_counters, forwarded_references, diag)
     });
 }
 
 fn lower_state_in_element(
     root_element: &ElementRc,
     state_info_type: &Type,
+    symbol_counters: &SymbolCounters,
+    forwarded_references: &mut ForwardedReferenceCache,
     diag: &mut BuildDiagnostics,
 ) {
     if root_element.borrow().states.is_empty() {
         return;
     }
     let has_transitions = !root_element.borrow().transitions.is_empty();
-    let state_property_name = compute_state_property_name(root_element);
-    let state_property = Expression::PropertyReference(NamedReference::new(
+    let state_property_nr = crate::layout::create_new_prop(
         root_element,
-        state_property_name.clone(),
-    ));
+        SmolStr::new_static("state"),
+        if has_transitions { state_info_type.clone() } else { Type::Int32 },
+    );
+    let state_property = Expression::PropertyReference(state_property_nr.clone());
     let state_property_ref = if has_transitions {
         Expression::StructFieldAccess {
             base: Box::new(state_property.clone()),
@@ -59,7 +70,12 @@ fn lower_state_in_element(
         for (property_reference, expr, node) in state.property_changes {
             affected_properties.insert(property_reference.clone());
             let element = property_reference.element();
-            let property_expr = match expression_for_property(&element, property_reference.name()) {
+            let property_expr = match expression_for_property(
+                &element,
+                property_reference.name(),
+                symbol_counters,
+                forwarded_references,
+            ) {
                 ExpressionForProperty::TwoWayBinding => {
                     diag.push_error(
                     format!("Cannot change the property '{}' in a state because it is initialized with a two-way binding", property_reference.name()),
@@ -68,13 +84,6 @@ fn lower_state_in_element(
                     continue;
                 }
                 ExpressionForProperty::Expression(e) => e,
-                ExpressionForProperty::InvalidBecauseOfIssue1461 => {
-                    diag.push_error(
-                        format!("Internal error: The expression for the default state currently cannot be represented: https://github.com/slint-ui/slint/issues/1461\nAs a workaround, add a binding for property {}", property_reference.name()),
-                        &node
-                    );
-                    continue;
-                }
             };
             let new_expr = Expression::Condition {
                 condition: Box::new(Expression::BinaryExpression {
@@ -100,14 +109,7 @@ fn lower_state_in_element(
         states_id.insert(state.id, idx as i32 + 1);
     }
 
-    root_element.borrow_mut().property_declarations.insert(
-        state_property_name.clone(),
-        PropertyDeclaration {
-            property_type: if has_transitions { state_info_type.clone() } else { Type::Int32 },
-            ..PropertyDeclaration::default()
-        },
-    );
-    root_element.borrow_mut().set_binding(state_property_name, state_value.into());
+    root_element.borrow_mut().set_binding(state_property_nr.name().clone(), state_value.into());
 
     lower_transitions_in_element(
         root_element,
@@ -177,74 +179,48 @@ fn lower_transitions_in_element(
     }
 }
 
-/// Returns a suitable unique name for the "state" property
-fn compute_state_property_name(root_element: &ElementRc) -> SmolStr {
-    let mut property_name = "state".to_owned();
-    while root_element.borrow().lookup_property(property_name.as_ref()).property_type
-        != Type::Invalid
-    {
-        property_name += "-";
-    }
-    property_name.into()
-}
-
 enum ExpressionForProperty {
     TwoWayBinding,
     Expression(Expression),
-    /// Workaround: the expression can't be represented with the current data structure, so make it an error for now.
-    InvalidBecauseOfIssue1461,
 }
 
 /// Return the expression binding currently associated to the given property
-fn expression_for_property(element: &ElementRc, name: &str) -> ExpressionForProperty {
-    let mut element_it = Some(element.clone());
-    let mut in_base = false;
-    while let Some(elem) = element_it {
-        if let Some(e) = elem.borrow().binding(name) {
-            if !e.two_way_bindings.is_empty() {
-                return ExpressionForProperty::TwoWayBinding;
-            }
-            let mut expr = e.expression.clone();
-            if !matches!(expr, Expression::Invalid) {
-                if in_base {
-                    // Check that the expression is valid in the new scope
-                    let mut has_invalid = false;
-                    expr.visit_recursive_mut(&mut |ex| match ex {
-                        Expression::PropertyReference(nr)
-                        | Expression::FunctionCall {
-                            function: Callable::Callback(nr) | Callable::Function(nr),
-                            ..
-                        } => {
-                            let e = nr.element();
-                            if Rc::ptr_eq(&e, &elem) {
-                                *nr = NamedReference::new(element, nr.name().clone());
-                            } else if Weak::ptr_eq(
-                                &e.borrow().enclosing_component,
-                                &elem.borrow().enclosing_component,
-                            ) {
-                                has_invalid = true;
-                            }
-                        }
-                        _ => (),
-                    });
-                    if has_invalid {
-                        return ExpressionForProperty::InvalidBecauseOfIssue1461;
-                    }
-                }
-
-                return ExpressionForProperty::Expression(expr);
-            }
+fn expression_for_property(
+    element: &ElementRc,
+    name: &str,
+    symbol_counters: &SymbolCounters,
+    forwarded_references: &mut ForwardedReferenceCache,
+) -> ExpressionForProperty {
+    let local_binding = element
+        .borrow()
+        .binding(name)
+        .map(|binding| (!binding.two_way_bindings.is_empty(), binding.expression.clone()));
+    if let Some((is_two_way_binding, expression)) = local_binding {
+        if is_two_way_binding {
+            return ExpressionForProperty::TwoWayBinding;
         }
-        element_it = if let ElementType::Component(base) = &elem.borrow().base_type {
-            in_base = true;
-            Some(base.root_element.clone())
-        } else {
-            None
-        };
+        if !matches!(expression, Expression::Invalid) {
+            return ExpressionForProperty::Expression(expression);
+        }
     }
-    let expr = super::materialize_fake_properties::initialize(element, name).unwrap_or_else(|| {
-        Expression::default_value_for_type(&element.borrow().lookup_property(name).property_type)
-    });
 
-    ExpressionForProperty::Expression(expr)
+    match forward_inherited_expression(element, name, symbol_counters, forwarded_references) {
+        InheritedExpression::Expression(expression) => {
+            return ExpressionForProperty::Expression(expression);
+        }
+        InheritedExpression::TwoWayBinding => return ExpressionForProperty::TwoWayBinding,
+        InheritedExpression::Unbound => {}
+    }
+
+    let expression =
+        super::materialize_fake_properties::initialize(element, name).unwrap_or_else(|| {
+            Expression::default_value_for_type(
+                &element
+                    .borrow()
+                    .lookup_property(name, PropertyLookupMode::InternalName)
+                    .property_type,
+            )
+        });
+
+    ExpressionForProperty::Expression(expression)
 }

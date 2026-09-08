@@ -103,7 +103,7 @@ fn lower_popup_window(
     }
 
     let map_close_on_click_value = |b: &BindingExpression| {
-        let Expression::BoolLiteral(v) = super::ignore_debug_hooks(&b.expression) else {
+        let Expression::BoolLiteral(v) = b.expression.ignore_debug_hooks() else {
             assert!(diag.has_errors());
             return None;
         };
@@ -116,7 +116,7 @@ fn lower_popup_window(
     };
 
     let close_policy = popup_window_element.borrow_mut().take_binding(CLOSE_POLICY).and_then(|b| {
-        if let Expression::EnumerationValue(v) = super::ignore_debug_hooks(&b.expression) {
+        if let Expression::EnumerationValue(v) = b.expression.ignore_debug_hooks() {
             Some(v.clone())
         } else {
             assert!(diag.has_errors());
@@ -187,13 +187,12 @@ fn lower_popup_window(
             }
         });
         if referenced {
-            let name = format_smolstr!("popup-{}-is-open", popup_window_element.borrow().id);
-            parent_component
-                .root_element
-                .borrow_mut()
-                .property_declarations
-                .insert(name.clone(), Type::Bool.into());
-            let is_open_ref = NamedReference::new(&parent_component.root_element, name);
+            // A base component may already have a popup with the same id
+            let is_open_ref = crate::layout::create_new_prop(
+                &parent_component.root_element,
+                format_smolstr!("popup-{}-is-open", popup_window_element.borrow().id),
+                Type::Bool,
+            );
             // The runtime writes this property through a generated setter that the (LLR) optimizer
             // cannot see, so mark it as set to keep it from being constant-folded to its default.
             is_open_ref.mark_as_set();

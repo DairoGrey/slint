@@ -26,6 +26,7 @@ These examples demonstrate the main features of Slint and how to use them in dif
 | [7GUIs![7 GUI's demo image](https://user-images.githubusercontent.com/22800467/169002497-5b90e63b-5717-4290-8ac7-c618d9e2a4f1.png "7 GUI's demo image")](./7guis/) | Our implementations of the ["7GUIs"](https://7guis.github.io/7guis/) Tasks. <br/> [Project...](./7guis/) |  |
 | [Slint & Bevy![Bevy demo image](https://github.com/user-attachments/assets/69785864-b6ae-40e1-8f62-4f70677d930e "Bevy demo image")](./bevy/slint-hosts-bevy/) | A demo that shows how to embed [Bevy](https://bevyengine.org) into Slint <br/> [Project...](./bevy/slint-hosts-bevy) |  |
 | [Bevy & Slint![Bevy demo image](https://github.com/user-attachments/assets/47671596-36df-4b3b-b316-a5e1c9475050 "Bevy demo image")](./bevy/bevy-hosts-slint/) | A demo that shows how to embed Slint into [Bevy](https://bevyengine.org) <br/> [Project...](./bevy/bevy-hosts-slint) |  |
+| [Custom Title Bar![Custom title bar demo image](https://github.com/user-attachments/assets/eaaf24d4-892e-49b0-aef7-6271df05f7d4 "Custom title bar demo image")](./custom-titlebar/) | A frameless window with a custom title bar: move, resize, minimize, maximize, and close. <br/> [Project...](./custom-titlebar) |  |
 
 ### Additional Examples
 
@@ -98,12 +99,14 @@ files to uncomment the line starting with `#wasm#` (or use the `sed` line bellow
 You can then use wasm-pack (which you may need to obtain with `cargo install wasm-pack`).
 This will generate the wasm in the `./pkg` directory, which the `index.html` file will open.
 Since wasm files cannot be served from `file://` URL, you need to open a wab server to serve
-the content
+the content.
+The `--features` flags select only the winit backend and the femtovg renderer,
+which keeps the software renderer out of the binary.
 
 ```sh
 cd examples/imagefilter/rust
 sed -i "s/^#wasm# //" Cargo.toml
-wasm-pack build --release --target web
+wasm-pack build --release --target web --no-default-features --features slint/backend-winit,slint/renderer-femtovg
 python3 -m http.server
 ```
 

@@ -227,7 +227,10 @@ pub fn lower_expression(
         },
         tree_Expression::EmptyComponentFactory => llr_Expression::EmptyComponentFactory,
         tree_Expression::EmptyDataTransfer => llr_Expression::EmptyDataTransfer,
-        tree_Expression::DebugHook { expression, .. } => lower_expression(expression, ctx),
+        tree_Expression::DebugHook { expression, id, .. } => llr_Expression::DebugHook {
+            expression: Box::new(lower_expression(expression, ctx)),
+            id: id.clone(),
+        },
         tree_Expression::Closure { arg_name, expression } => llr_Expression::Closure {
             arg_name: arg_name.clone(),
             expression: Box::new(lower_expression(expression, ctx)),
@@ -287,7 +290,7 @@ fn lower_function_call(
     expression: &tree_Expression,
     ctx: &mut ExpressionLoweringCtx<'_>,
 ) -> llr_Expression {
-    let tree_Expression::FunctionCall { function, arguments, .. } = expression else {
+    let tree_Expression::FunctionCall { function, arguments, source_location } = expression else {
         unreachable!()
     };
     match function {
@@ -317,7 +320,11 @@ fn lower_function_call(
             {
                 *output = llr_ArrayOutput::Slice;
             }
-            llr_Expression::BuiltinFunctionCall { function: f.clone(), arguments }
+            llr_Expression::BuiltinFunctionCall {
+                function: f.clone(),
+                arguments,
+                source_location: source_location.clone(),
+            }
         }
         Callable::Callback(nr) => {
             let arguments = arguments.iter().map(|e| lower_expression(e, ctx)).collect::<_>();
@@ -635,6 +642,7 @@ fn lower_restart_timer(args: &[tree_Expression], ctx: &ExpressionLoweringCtx) ->
 
         llr_Expression::BuiltinFunctionCall {
             function: BuiltinFunction::RestartTimer,
+            source_location: None,
             arguments: vec![llr_Expression::PropertyReference(MemberReference::Relative {
                 parent_level,
                 local_reference: LocalMemberReference {
@@ -702,6 +710,7 @@ fn lower_show_popup_window(
         llr_Expression::BuiltinFunctionCall {
             function: BuiltinFunction::ShowPopupWindow,
             arguments,
+            source_location: None,
         }
     } else {
         panic!("invalid arguments to ShowPopupWindow");
@@ -717,6 +726,7 @@ fn lower_close_popup_window(
         llr_Expression::BuiltinFunctionCall {
             function: BuiltinFunction::ClosePopupWindow,
             arguments: vec![llr_Expression::NumberLiteral(popup_index as _), owner_ref],
+            source_location: None,
         }
     } else {
         panic!("invalid arguments to ClosePopupWindow");

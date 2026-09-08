@@ -15,7 +15,7 @@ on:
 env:
     MACOSX_DEPLOYMENT_TARGET: "11.0"
     # Keep in sync with features in nightly_snapshot.yaml, slint_tool_binary.yaml, api/node/Cargo.toml, and api/python/slint/Cargo.toml
-    SLINT_BINARY_FEATURES: "-DSLINT_FEATURE_BACKEND_LINUXKMS_NOSEAT=ON -DSLINT_FEATURE_BACKEND_WINIT=ON -DSLINT_FEATURE_RENDERER_FEMTOVG=ON -DSLINT_FEATURE_RENDERER_SKIA=ON -DSLINT_FEATURE_RENDERER_SOFTWARE=ON -DSLINT_FEATURE_LIVE_PREVIEW=ON"
+    SLINT_BINARY_FEATURES: "-DSLINT_FEATURE_BACKEND_LINUXKMS_LIBINPUT=ON -DSLINT_FEATURE_BACKEND_WINIT=ON -DSLINT_FEATURE_RENDERER_FEMTOVG=ON -DSLINT_FEATURE_RENDERER_SKIA=ON -DSLINT_FEATURE_RENDERER_SOFTWARE=ON -DSLINT_FEATURE_LIVE_PREVIEW=ON"
     SLINT_MCU_FEATURES: "-DSLINT_FEATURE_FREESTANDING=ON -DSLINT_FEATURE_RENDERER_SOFTWARE=ON"
     # env variable used by espup https://github.com/esp-rs/espup?tab=readme-ov-file#github-api
     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -100,7 +100,7 @@ jobs:
               with:
                   target: ${{ matrix.target }}
             - name: Install GNU Arm Embedded Toolchain
-              run: sudo timeout 300 apt-get update && sudo timeout 300 apt-get install gcc-arm-none-eabi
+              run: sudo timeout 600 apt-get update && sudo timeout 600 apt-get install gcc-arm-none-eabi
             - name: Prepare licenses
               run: bash -x ../../scripts/prepare_binary_package.sh ${{ runner.workspace }}/cppbuild
               working-directory: api/cpp/

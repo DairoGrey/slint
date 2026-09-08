@@ -12,6 +12,7 @@ import {
 } from "@slint/common-files/src/utils/starlight-site-defaults";
 import { rehypeExternalLinksSlint } from "@slint/common-files/src/utils/rehype-external-links-preset";
 import rehypeSlsIds from "@slint/common-files/src/utils/rehype-sls-ids.mjs";
+import remarkBaseLinks from "@slint/common-files/src/utils/remark-base-links.mjs";
 import { slintStarlightSocial } from "@slint/common-files/src/utils/starlight-social";
 import {
     BASE_PATH,
@@ -36,9 +37,9 @@ export default defineConfig({
     site: `${BASE_URL}${BASE_PATH}`,
     base: BASE_PATH,
     trailingSlash: SLINT_STARLIGHT_TRAILING_SLASH,
-    // Pages that moved into the language reference. Astro serves the source
-    // routes under the base path but uses the destinations verbatim, so they
-    // need the prefix.
+    // Pages that moved elsewhere in the tree. Astro serves the source routes
+    // under the base path but uses the destinations verbatim, so they need the
+    // prefix.
     redirects: {
         "/reference/primitive-types/": `${BASE_PATH}reference/property-types/numeric-types/`,
         "/reference/colors-and-brushes/": `${BASE_PATH}reference/property-types/colors-and-brushes/`,
@@ -48,9 +49,17 @@ export default defineConfig({
         "/reference/language/colors-and-brushes/": `${BASE_PATH}reference/property-types/colors-and-brushes/`,
         "/reference/language/arrays-and-models/": `${BASE_PATH}reference/property-types/arrays-and-models/`,
         "/reference/global-structs-enums/": `${BASE_PATH}reference/property-types/builtin-structs/`,
+        "/guide/platforms/desktop/": `${BASE_PATH}guide/platforms/desktop/general/`,
+        "/guide/platforms/other/": `${BASE_PATH}guide/platforms/desktop/general/`,
+        "/guide/platforms/packaging/windows-packaging/": `${BASE_PATH}guide/platforms/desktop/windows/packaging/`,
+        "/guide/platforms/desktop/linux/": `${BASE_PATH}guide/platforms/desktop/linux/general/`,
     },
     markdown: {
         gfm: true,
+        // Markdown links written from the site root (e.g. in the element doc
+        // comments shared with the safety manual) get the base added at build
+        // time, like on the safety-manual site.
+        remarkPlugins: [[remarkBaseLinks, { base: BASE_PATH }]],
         rehypePlugins: [
             rehypeExternalLinksSlint,
             // The traceability identifiers anchor the paragraphs here too, but
@@ -84,6 +93,7 @@ export default defineConfig({
                         icon: "open-book",
                         items: [
                             { label: "Overview", slug: "index" },
+                            "guide/getting-started",
                             {
                                 label: "Tooling",
                                 collapsed: true,
@@ -205,7 +215,46 @@ export default defineConfig({
                                 label: "Platforms",
                                 collapsed: true,
                                 items: [
-                                    "guide/platforms/desktop",
+                                    {
+                                        label: "Desktop",
+                                        collapsed: true,
+                                        items: [
+                                            "guide/platforms/desktop/general",
+                                            {
+                                                label: "Windows",
+                                                collapsed: true,
+                                                items: [
+                                                    {
+                                                        label: "Overview",
+                                                        slug: "guide/platforms/desktop/windows/general",
+                                                    },
+                                                    "guide/platforms/desktop/windows/packaging",
+                                                ],
+                                            },
+                                            {
+                                                label: "macOS",
+                                                collapsed: true,
+                                                items: [
+                                                    {
+                                                        label: "Overview",
+                                                        slug: "guide/platforms/desktop/macos/general",
+                                                    },
+                                                    "guide/platforms/desktop/macos/packaging",
+                                                ],
+                                            },
+                                            {
+                                                label: "Linux",
+                                                collapsed: true,
+                                                items: [
+                                                    {
+                                                        label: "Overview",
+                                                        slug: "guide/platforms/desktop/linux/general",
+                                                    },
+                                                    "guide/platforms/desktop/linux/packaging",
+                                                ],
+                                            },
+                                        ],
+                                    },
                                     "guide/platforms/embedded",
                                     {
                                         label: "Mobile",
@@ -217,7 +266,6 @@ export default defineConfig({
                                         ],
                                     },
                                     "guide/platforms/web",
-                                    "guide/platforms/other",
                                 ],
                             },
                             {
@@ -260,7 +308,7 @@ export default defineConfig({
                                                   slug: "guide/experimental/match-elements",
                                               },
                                               {
-                                                  label: "Array Predicates",
+                                                  label: "Array Search Functions",
                                                   slug: "guide/experimental/array-predicates",
                                               },
                                               {
@@ -272,8 +320,12 @@ export default defineConfig({
                                                   slug: "guide/experimental/deprecated",
                                               },
                                               {
-                                                  label: "Flexbox Item Properties",
-                                                  slug: "guide/experimental/flexbox-item-properties",
+                                                  label: "Shadowable Members",
+                                                  slug: "guide/experimental/shadowable",
+                                              },
+                                              {
+                                                  label: "Custom Mouse Cursor",
+                                                  slug: "guide/experimental/custom-mouse-cursor",
                                               },
                                           ],
                                       },
@@ -720,6 +772,12 @@ export default defineConfig({
                 // checks that relative links point to existing pages.
                 slintStarlightLinksValidatorPlugin({
                     errorOnRelativeLinks: false,
+                    // The Builtin Enums page imports one `_<Enum>.md` partial
+                    // per enum, and the validator doesn't see the ids inside an
+                    // imported partial. Enum names carry no dash, so this skips
+                    // the value anchors only, and the link carries the base path
+                    // the site is deployed under, hence the leading `**`.
+                    exclude: ["**/property-types/builtin-enums/#*-*"],
                 }),
             ],
             social: slintStarlightSocial,

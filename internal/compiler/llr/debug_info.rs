@@ -6,9 +6,6 @@
 //!
 //! Populated only when [`crate::CompilerConfiguration::debug_info`] is set.
 //! Treat entries as advisory and tolerate missing data.
-//!
-//! These types hold a [`crate::diagnostics::SourceLocation`] which isn't `Send`.
-//! Making LLR `Send` will require replacing it with a path + offset.
 
 use crate::diagnostics::SourceLocation;
 use smol_str::SmolStr;
@@ -26,6 +23,9 @@ pub struct ItemDebugInfo {
     /// Stable hash identifying the source element across builds.
     /// See [`crate::object_tree::ElementDebugInfo::element_hash`].
     pub element_hash: u64,
+    /// Whether the item is an injected wrapper taking over its child's
+    /// geometry. See [`crate::object_tree::Element::is_injected_wrapper_element`].
+    pub is_injected_wrapper_element: bool,
 }
 
 /// Debug info for a [`SubComponent`](super::SubComponent).

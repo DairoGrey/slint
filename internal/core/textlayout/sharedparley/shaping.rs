@@ -41,7 +41,7 @@ pub(super) struct LayoutWithoutLineBreaksBuilder {
 }
 
 impl LayoutWithoutLineBreaksBuilder {
-    fn new(
+    pub(super) fn new(
         font_request: Option<FontRequest>,
         text_wrap: TextWrap,
         stroke: Option<TextStrokeStyle>,
@@ -68,20 +68,11 @@ impl LayoutWithoutLineBreaksBuilder {
         font_ctx: &'a mut parley::FontContext,
         text: &'a str,
     ) -> parley::RangedBuilder<'a, Brush> {
-        // Pin the line height to the requested font's metrics so fallback runs (e.g.
-        // password chars rendered by a wider-descender symbol font) don't grow the
-        // line box. FontSizeRelative makes the ratio scale with any per-span FontSize.
-        let line_height_ratio = self.font_request.as_ref().and_then(|font_request| {
-            let font = font_request
-                .clone()
-                .query_fontique(&mut font_ctx.collection, &mut font_ctx.source_cache)?;
-            let face = skrifa::FontRef::from_index(font.blob.data(), font.index).ok()?;
-            let location = face.axes().location(font.synthesis.variation_settings());
-            let metrics = face.metrics(skrifa::instance::Size::unscaled(), &location);
-            let units_per_em = metrics.units_per_em as f32;
-            (units_per_em > 0.0)
-                .then(|| (metrics.ascent - metrics.descent + metrics.leading) / units_per_em)
-        });
+        // Use the requested font's natural line-height ratio for every run so fallback fonts,
+        // such as the symbol font used for password characters, don't enlarge the line box.
+        // `FontSizeRelative` scales the result with each styled span's font size.
+        let line_height_ratio =
+            self.font_request.as_ref().and_then(|fr| line_height_ratio(font_ctx, fr));
 
         let mut builder = layout_ctx.ranged_builder(font_ctx, text, self.scale_factor.get(), false);
 
@@ -249,6 +240,23 @@ impl LayoutWithoutLineBreaksBuilder {
     }
 }
 
+/// The line-height ratio, relative to the font size, that every shaped line gets.
+pub(super) fn line_height_ratio(
+    font_ctx: &mut parley::FontContext,
+    font_request: &FontRequest,
+) -> Option<f32> {
+    let font = font_request.query_fontique(&mut font_ctx.collection, &mut font_ctx.source_cache)?;
+    let face = skrifa::FontRef::from_index(font.blob.data(), font.index).ok()?;
+    let location = face.axes().location(font.synthesis.variation_settings());
+    let metrics = face.metrics(skrifa::instance::Size::unscaled(), &location);
+    let units_per_em = metrics.units_per_em as f32;
+    (units_per_em > 0.0)
+        .then(|| (metrics.ascent - metrics.descent + metrics.leading) / units_per_em)
+        .map(|natural_ratio| {
+            font_request.line_height_for_natural_height(natural_ratio).unwrap_or(natural_ratio)
+        })
+}
+
 /// Splits plain text into paragraph byte ranges at `'\n'`. The `'\n'` and any preceding `'\r'`
 /// are excluded from the range: parley treats a lone CR as a mandatory line break, so a CRLF
 /// left in the paragraph would render an extra empty line.
@@ -360,6 +368,11 @@ pub(super) fn content_widths_builder(
 #[cfg(test)]
 pub(super) fn plain_builder_for_tests() -> LayoutWithoutLineBreaksBuilder {
     LayoutWithoutLineBreaksBuilder::new(None, TextWrap::NoWrap, None, ScaleFactor::new(1.0))
+}
+
+#[cfg(test)]
+pub(super) fn wrap_builder_for_tests() -> LayoutWithoutLineBreaksBuilder {
+    LayoutWithoutLineBreaksBuilder::new(None, TextWrap::WordWrap, None, ScaleFactor::new(1.0))
 }
 
 /// Shapes `text` the way both the drawing and the measuring paths need it, so that they can share

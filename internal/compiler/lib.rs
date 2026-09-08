@@ -17,10 +17,10 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+mod builtin_elements;
 pub mod builtin_macros;
 pub mod data_uri;
 pub mod diagnostics;
-pub mod doc_comments;
 pub mod embedded_resources;
 pub mod expression_tree;
 pub mod fileaccess;
@@ -30,7 +30,6 @@ pub mod layout;
 pub mod lexer;
 pub mod literals;
 pub mod llr;
-pub(crate) mod load_builtins;
 pub mod lookup;
 pub mod namedreference;
 pub mod object_tree;
@@ -208,6 +207,11 @@ pub struct CompilerConfiguration {
     /// safety-critical subset.
     #[cfg(feature = "slint-sc")]
     pub(crate) slint_sc: bool,
+
+    /// Set by tools such as `slint-viewer`, the LSP (editor diagnostics/preview), and the
+    /// live-reload runtime to indicate that the `.slint` file is being previewed rather than
+    /// driven by real host application logic.
+    pub is_preview: bool,
 }
 
 impl CompilerConfiguration {
@@ -316,6 +320,7 @@ impl CompilerConfiguration {
             rust_module: None,
             #[cfg(feature = "slint-sc")]
             slint_sc,
+            is_preview: false,
         }
     }
 }

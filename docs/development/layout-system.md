@@ -32,16 +32,9 @@ Layout types:
 
 ### LayoutInfo (Runtime)
 
-```rust
-pub struct LayoutInfo {
-    pub min: Coord,           // Minimum size
-    pub max: Coord,           // Maximum size
-    pub min_percent: Coord,   // Minimum as % of parent
-    pub max_percent: Coord,   // Maximum as % of parent
-    pub preferred: Coord,     // Preferred size
-    pub stretch: f32,         // Stretch factor (0.0 = don't stretch)
-}
-```
+The constraints for one item along one axis: a min and a max, the same two again as a percentage
+of the parent, a preferred size, and a stretch factor (0.0 means don't stretch). Sizes are
+`Coord`, the stretch is an `f32`. See `LayoutInfo` in `internal/core/layout.rs`.
 
 ### Constraint Merging
 
@@ -96,7 +89,8 @@ When items fit without shrinking, alignment determines positioning:
 
 ### Grid Layout
 
-Grid layouts solve independently for each axis:
+Grid layouts solve each axis on its own, except that the vertical pass measures
+height-for-width cells at the width the horizontal pass solved:
 1. **Organize**: Convert cell definitions to row/column assignments
 2. **Solve horizontal**: Calculate column widths and x positions
 3. **Solve vertical**: Calculate row heights and y positions
@@ -142,47 +136,27 @@ Child x/y/width/height bound to cache access expressions
 
 ### Compiler-Side
 
-```rust
-// internal/compiler/layout.rs
+All in `internal/compiler/layout.rs`:
 
-pub struct GridLayout {
-    pub elems: Vec<GridLayoutElement>,  // Cells
-    pub geometry: LayoutGeometry,        // Padding, spacing, alignment
-}
-
-pub struct BoxLayout {
-    pub orientation: Orientation,  // Horizontal or Vertical
-    pub elems: Vec<LayoutItem>,
-    pub geometry: LayoutGeometry,
-}
-
-pub struct LayoutConstraints {
-    pub min_width: Option<NamedReference>,
-    pub max_width: Option<NamedReference>,
-    // ... other constraint properties as references
-}
-```
+- `GridLayout` - the cells plus the `LayoutGeometry` (padding, spacing, alignment). It also
+  carries the button roles when the grid is really a `Dialog`, and whether any row/column
+  expression uses `auto`.
+- `BoxLayout` - the orientation, the items and the same `LayoutGeometry`, plus the
+  `cross-axis-alignment` property if one was set.
+- `LayoutConstraints` - one `Option<NamedReference>` per `min-`/`max-`/`preferred-` width and
+  height and per stretch, the two fixed-size flags, and a `LayoutConstraintLocality` with one bool
+  per named reference recording whether it was set on the element itself rather than inherited
+  from a base component. Inherited ones are already baked into the element's `layoutinfo-*`, so a
+  parent that measured the cell through its layout-info must not re-apply them.
 
 ### Runtime
 
-```rust
-// internal/core/layout.rs
+Both in `internal/core/layout.rs`:
 
-pub struct GridLayoutData {
-    pub size: Coord,
-    pub spacing: Coord,
-    pub padding: Padding,
-    pub organized_data: GridLayoutOrganizedData,
-}
-
-pub struct BoxLayoutData<'a> {
-    pub size: Coord,
-    pub spacing: Coord,
-    pub padding: Padding,
-    pub alignment: LayoutAlignment,
-    pub cells: Slice<'a, LayoutItemInfo>,
-}
-```
+- `GridLayoutData` - the available size, the spacing and padding, and the
+  `GridLayoutOrganizedData` produced by `organize_grid_layout()`.
+- `BoxLayoutData` - the available size, the spacing and padding, the `LayoutAlignment`, and a
+  borrowed slice of `LayoutItemInfo`, one per cell.
 
 ## Layout Cache Formats
 
@@ -302,11 +276,84 @@ These are represented as `Expression::LayoutCacheAccess` (standard, for box layo
 `Expression::GridRepeaterCacheAccess` (grid repeaters with any repeater structure) in the expression tree, which
 the code generators compile to the appropriate runtime access pattern.
 
+## Measuring repeated cells
+
+Where no cross size is passed in — the GridLayout solve, a `VerticalLayout` main
+pass — a static height-for-width cell (a word-wrapped `Text`, say) sizes itself:
+its `width` is bound to the layout cache, so the `Text` reads the width the
+layout gave it while the layout-info is computed (`text_layout_info` in
+`i-slint-core` treats a cross constraint below zero as "use the current width").
+Other passes hand static cells an explicit constraint.
+
+A repeated cell cannot read its own width that way: the layout asks the whole
+instance for its layout-info, and the instance goes through
+`layoutinfo-v-with-constraint` rather than reading `self.width` (see
+`synthesize_layoutinfo_v_with_constraint`), so it is measured at a fixed cross
+size — the instance's preferred width for the vertical info, an unbounded height
+for the horizontal one. The layout therefore passes the real size in, through
+the accessors on `RepeatedItemTree`:
+
+| Accessor | Backed by | Supplied by |
+|---|---|---|
+| `layout_item_info_at_cross_width(w)` | `SubComponent::layout_info_v_at_cross_width_for_repeated` | any vertical pass at a known width: `VerticalLayout` main pass, `HorizontalLayout` ortho pass, GridLayout vertical pass |
+| `layout_item_info_at_cross_height(h)` | `SubComponent::layout_info_h_at_cross_height_for_repeated` | any horizontal pass at a known height: `HorizontalLayout` main pass, `VerticalLayout` ortho pass |
+| `flexbox_layout_item_info_at_cross_width(w)` / `_height(h)` | the same two expressions | FlexboxLayout solve |
+
+Which accessor is used depends on the orientation being computed, not on the box
+layout's own direction: a `VerticalLayout` calls
+`layout_item_info_at_cross_width` from its main pass and
+`layout_item_info_at_cross_height` from its ortho pass, a `HorizontalLayout` the
+other way around. GridLayout appears in the first row only. It solves horizontal
+first, so measuring a cell at a solved height would make the horizontal solve
+read the vertical cache, which the end of this section explains it must not.
+
+The `SubComponent` fields are in `internal/compiler/llr/item_tree.rs`; the
+generators emit the accessors in `internal/compiler/generator/rust.rs` and
+`generator/cpp.rs`, and the interpreter mirrors them in
+`internal/interpreter/eval_layout.rs` and `instance.rs`.
+
+Where the size comes from differs per layout kind:
+
+- **Box layout, main pass** forwards one size for all cells (the layout's cross
+  content size), in `Expression::WithLayoutItemInfo::repeated_cross_size`.
+- **Box layout, ortho pass** has no single size to forward:
+  `Expression::BoxLayoutInfoOrthoWithMeasure` solves the main axis first, then
+  measures each instance at its *own* solved main size, as a
+  `BoxMeasureCell::Repeated`. `repeated_cross_size` is `None` here.
+- **GridLayout** has one width per column, so it reads each cell's own slot out
+  of `layout-cache-h`: `LayoutRepeatedElement::cross_width`
+  (`internal/compiler/layout.rs`) is the cell's own `width` binding with the
+  repeater index replaced by the `GRID_MEASURE_REPEATER_INDEX_LOCAL` local,
+  which the generated loop binds to the instance index. A *repeated* child of a
+  repeated `Row` uses `SubComponent::grid_row_child_cross_width` instead,
+  addressed by the child's flattened index (`GRID_MEASURE_CHILD_INDEX_LOCAL`).
+  One expression serves every such child, and
+  `RowChildTemplateInfo::Repeated::measure_at_cross_width` records which ones it
+  applies to. A static child of a `Row` keeps its plain, unconstrained
+  layout-info.
+- **FlexboxLayout** passes a size twice: the container's cross width up front,
+  in `Expression::WithFlexboxLayoutItemInfo::repeated_cross_width` (column flex
+  only), and then per cell from taffy's measure callback
+  (`SolveFlexboxLayoutWithMeasure`, `FlexboxLayoutInfoCrossAxisWithMeasure`),
+  which re-measures at the size taffy actually assigns.
+
+Reading the horizontal cache from the vertical pass is only sound while the
+horizontal solve does not read back into the vertical cache. A *repeated*
+width-for-height cell breaks that: the grid measures it through its plain
+`layout_info_h`, which pulls the instance's own height, and that height comes
+from the grid's vertical cache. `mark_grid_h_solve_reads_v_cache` sets
+`GridLayoutCell::h_solve_reads_v_cache` on every cell of such a grid, and the
+vertical pass then falls back to the instance's plain layout-info instead of
+closing a binding loop. Static cells are safe: on the grid solve
+`cell_layout_info` passes no cross size, so a cell with
+`layoutinfo-h-with-constraint` is measured at an unbounded height and one
+without it never reads its own height.
+
 ## Common Modification Patterns
 
 ### Adding a New Layout Property
 
-1. Add property to builtin layout element in `internal/compiler/builtins.slint`
+1. Add property to builtin layout element in `internal/compiler/builtin_elements.rs`
 2. Handle in `LayoutGeometry` or `LayoutConstraints` in `internal/compiler/layout.rs`
 3. Update `lower_layout.rs` to extract and use the property
 4. Update runtime structs in `internal/core/layout.rs` if needed
@@ -329,7 +376,7 @@ the code generators compile to the appropriate runtime access pattern.
 ## Key Concepts for Agents
 
 1. **Two-phase architecture**: Compile-time creates structure, runtime evaluates values
-2. **Independent axis solving**: Horizontal and vertical are solved separately (for horizontal, vertical and grid layouts)
+2. **Independent axis solving**: Horizontal and vertical are solved separately (for horizontal, vertical and grid layouts), except where the vertical pass measures a height-for-width cell at the solved width
 3. **Constraint tightening**: Merging takes the most restrictive bounds
 4. **Stretch factors**: Control how extra space is distributed (0 = don't grow)
 5. **Cache indirection**: Enables repeaters without runtime structure changes

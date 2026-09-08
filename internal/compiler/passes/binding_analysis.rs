@@ -169,7 +169,7 @@ impl From<NamedReference> for PropertyPath {
 struct AnalysisContext<'a> {
     visited: HashSet<PropertyPath>,
     /// The stack of properties that depends on each other
-    currently_analyzing: linked_hash_set::LinkedHashSet<PropertyPath>,
+    currently_analyzing: indexmap::IndexSet<PropertyPath>,
     /// When set, one of the property in the `currently_analyzing` stack is the window layout property
     /// And we should issue a warning if that's part of a loop instead of an error
     window_layout_property: Option<PropertyPath>,
@@ -316,7 +316,7 @@ fn analyze_binding(
     let mut depends_on_external = DependsOnExternal(false);
     let element = current.prop.element();
     let name = current.prop.name();
-    if (context.currently_analyzing.back() == Some(current))
+    if (context.currently_analyzing.last() == Some(current))
         && !element
             .borrow()
             .binding_cell_including_synthetic(name)
@@ -345,12 +345,13 @@ fn analyze_binding(
             if !out.is_empty() {
                 out.push_str(" -> ");
             }
+            let name = prop.prop.declared_name();
             match prop.prop.element().borrow().id.as_str() {
-                "" => out.push_str(prop.prop.name()),
+                "" => out.push_str(&name),
                 id => {
                     out.push_str(id);
                     out.push('.');
-                    out.push_str(prop.prop.name());
+                    out.push_str(&name);
                 }
             }
         }
@@ -378,10 +379,14 @@ fn analyze_binding(
             }
 
             let span = binding.span.clone().unwrap_or_else(|| elem.to_source_location());
-            if !context.error_on_binding_loop_with_window_layout && has_window_layout {
-                diag.push_warning(format!("The binding for the property '{}' is part of a binding loop ({loop_description}).\nThis was allowed in previous version of Slint, but is deprecated and may cause panic at runtime", p.name()), &span);
-            } else {
-                diag.push_error(format!("The binding for the property '{}' is part of a binding loop ({loop_description})", p.name()), &span);
+            // Skip the properties of synthetic elements (eg. the Flickable's content element):
+            // they have no location in the source. The rest of the loop is still reported.
+            if span.source_file.is_some() {
+                if !context.error_on_binding_loop_with_window_layout && has_window_layout {
+                    diag.push_warning(format!("The binding for the property '{}' is part of a binding loop ({loop_description}).\nThis was allowed in previous version of Slint, but is deprecated and may cause panic at runtime", p.declared_name()), &span);
+                } else {
+                    diag.push_error(format!("The binding for the property '{}' is part of a binding loop ({loop_description})", p.declared_name()), &span);
+                }
             }
             if it == current {
                 break;
@@ -421,10 +426,13 @@ fn analyze_binding(
     let mut process_prop = |prop: &PropertyPath, r, context: &mut AnalysisContext| {
         depends_on_external |=
             process_property(&current.relative(prop), r, context, reverse_aliases, diag);
-        for x in reverse_aliases.get(&prop.prop).unwrap_or(&Default::default()) {
-            if x != &current.prop && x != &prop.prop {
+        for x in find_alias_targets(prop, reverse_aliases) {
+            // Unlike `x == prop.prop` (a plain duplicate, skipped below), `x == current.prop`
+            // is kept: it re-enters the binding being analyzed through its own alias, which is
+            // how a loop like `foo <=> bar` plus `foo: bar` gets caught.
+            if x.prop != prop.prop {
                 depends_on_external |= process_property(
-                    &current.relative(&x.clone().into()),
+                    &current.relative(&x),
                     ReadType::PropertyRead,
                     context,
                     reverse_aliases,
@@ -437,6 +445,27 @@ fn analyze_binding(
     recurse_expression(&current.prop.element(), &b.expression, &mut |p, r| {
         process_prop(p, r, context)
     });
+
+    // `remove_aliases` merges two-way bound properties into one, keeping only one of the bindings,
+    // so the expression of a property aliased to this one is a dependency of this binding too.
+    // The other direction is covered by the `two_way_bindings` loop above.
+    let mut aliased_deps = Vec::new();
+    for alias in reverse_aliases.get(&current.prop).into_iter().flatten() {
+        let element = alias.element();
+        let element_borrow = element.borrow();
+        if let Some(alias_binding) = element_borrow.binding(alias.name()) {
+            recurse_expression(&element, &alias_binding.expression, &mut |p, r| {
+                // A reference back to this property is reported as "cannot refer to itself".
+                if !(p.elements.is_empty() && p.prop == current.prop) {
+                    aliased_deps.push((p.clone(), r))
+                }
+            });
+        }
+    }
+    // Process outside of the loop so that the alias binding isn't borrowed while it is analyzed.
+    for (p, r) in &aliased_deps {
+        process_prop(p, *r, context);
+    }
 
     let mut is_const = b.expression.is_constant(Some(context.global_analysis))
         && b.two_way_bindings.iter().all(|n| n.is_constant());
@@ -467,10 +496,47 @@ fn analyze_binding(
         None => (),
     }
 
-    let o = context.currently_analyzing.pop_back();
+    let o = context.currently_analyzing.pop();
     assert_eq!(&o.unwrap(), current);
 
     depends_on_external
+}
+
+/// Find properties two-way-bound (via `<=>`) to `prop`, ascending through base components
+/// when the alias was declared there rather than on `prop`'s own element.
+fn find_alias_targets(prop: &PropertyPath, reverse_aliases: &ReverseAliases) -> Vec<PropertyPath> {
+    // Alias declared on prop's own element, so return the target(s) verbatim without rebasing
+    if let Some(v) = reverse_aliases.get(&prop.prop) {
+        return v
+            .iter()
+            .map(|x| PropertyPath { elements: prop.elements.clone(), prop: x.clone() })
+            .collect();
+    }
+
+    let start_element = prop.elements.first().map_or_else(|| prop.prop.element(), |e| e.0.clone());
+    let mut cur = prop.prop.clone();
+    loop {
+        let element = cur.element();
+        if element.borrow().binding(cur.name()).is_some() {
+            return Vec::new();
+        }
+        let next = match &element.borrow().base_type {
+            ElementType::Component(base) => {
+                if element.borrow().property_declarations.contains_key(cur.name()) {
+                    return Vec::new();
+                }
+                base.root_element.clone()
+            }
+            _ => return Vec::new(),
+        };
+        cur = NamedReference::new(&next, cur.name().clone());
+        if let Some(v) = reverse_aliases.get(&cur) {
+            return v
+                .iter()
+                .map(|x| PropertyPath::from(NamedReference::new(&start_element, x.name().clone())))
+                .collect();
+        }
+    }
 }
 
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -570,12 +636,17 @@ fn recurse_expression(
             }
             visit_layout_items_dependencies(l.elems.iter(), *o, vis);
 
-            // The orthogonal solve depends on `cross-axis-alignment`.
-            if matches!(expr, Expression::SolveBoxLayout(..))
-                && *o != l.orientation
-                && let Some(nr) = l.cross_alignment.as_ref()
-            {
-                vis(&nr.clone().into(), P);
+            // The orthogonal solve depends on `cross-axis-alignment` and on the
+            // cells' `cross-axis-self-alignment`.
+            if matches!(expr, Expression::SolveBoxLayout(..)) && *o != l.orientation {
+                if let Some(nr) = l.cross_alignment.as_ref() {
+                    vis(&nr.clone().into(), P);
+                }
+                for cell in l.elems.iter() {
+                    if let Some(nr) = cell.cross_axis_self_alignment.as_ref() {
+                        vis(&nr.clone().into(), P);
+                    }
+                }
             }
 
             let mut g = l.geometry.clone();
@@ -607,7 +678,7 @@ fn recurse_expression(
                             vis(&nr.clone().into(), P);
                         }
                         visit_layout_items_layoutinfo_cross_axis_dependencies(
-                            layout.elems.iter().map(|fi| &fi.item),
+                            layout.elems.iter(),
                             Orientation::Vertical,
                             vis,
                         );
@@ -617,7 +688,7 @@ fn recurse_expression(
                             vis(&nr.clone().into(), P);
                         }
                         visit_layout_items_layoutinfo_cross_axis_dependencies(
-                            layout.elems.iter().map(|fi| &fi.item),
+                            layout.elems.iter(),
                             Orientation::Horizontal,
                             vis,
                         );
@@ -631,12 +702,12 @@ fn recurse_expression(
                             vis(&nr.clone().into(), P);
                         }
                         visit_layout_items_layoutinfo_cross_axis_dependencies(
-                            layout.elems.iter().map(|fi| &fi.item),
+                            layout.elems.iter(),
                             Orientation::Horizontal,
                             vis,
                         );
                         visit_layout_items_layoutinfo_cross_axis_dependencies(
-                            layout.elems.iter().map(|fi| &fi.item),
+                            layout.elems.iter(),
                             Orientation::Vertical,
                             vis,
                         );
@@ -648,11 +719,7 @@ fn recurse_expression(
                 match layout.axis_relation(orientation) {
                     FlexboxAxisRelation::MainAxis => {
                         // Main axis: only visit same-axis item dependencies
-                        visit_layout_items_dependencies(
-                            layout.elems.iter().map(|fi| &fi.item),
-                            orientation,
-                            vis,
-                        );
+                        visit_layout_items_dependencies(layout.elems.iter(), orientation, vis);
                     }
                     FlexboxAxisRelation::CrossAxis => {
                         // Cross axis: depends on the perpendicular (main-axis)
@@ -674,12 +741,12 @@ fn recurse_expression(
                             vis(&nr.clone().into(), P);
                         }
                         visit_layout_items_dependencies(
-                            layout.elems.iter().map(|fi| &fi.item),
+                            layout.elems.iter(),
                             Orientation::Horizontal,
                             vis,
                         );
                         visit_layout_items_dependencies(
-                            layout.elems.iter().map(|fi| &fi.item),
+                            layout.elems.iter(),
                             Orientation::Vertical,
                             vis,
                         );
@@ -689,12 +756,12 @@ fn recurse_expression(
                         // dependencies but NOT perpendicular dimensions (adding
                         // those leads to binding loops for runtime direction).
                         visit_layout_items_dependencies(
-                            layout.elems.iter().map(|fi| &fi.item),
+                            layout.elems.iter(),
                             Orientation::Horizontal,
                             vis,
                         );
                         visit_layout_items_dependencies(
-                            layout.elems.iter().map(|fi| &fi.item),
+                            layout.elems.iter(),
                             Orientation::Vertical,
                             vis,
                         );
@@ -963,6 +1030,14 @@ fn visit_implicit_layout_info_dependencies(
             vis(&NamedReference::new(item, SmolStr::new_static("font-size")).into(), N);
             vis(&NamedReference::new(item, SmolStr::new_static("font-weight")).into(), N);
             vis(&NamedReference::new(item, SmolStr::new_static("letter-spacing")).into(), N);
+            // The line height only stretches the line boxes, so it feeds the vertical
+            // layout info but can never influence the preferred width.
+            if orientation == Orientation::Vertical {
+                vis(
+                    &NamedReference::new(item, SmolStr::new_static("line-height-factor")).into(),
+                    N,
+                );
+            }
             vis(&NamedReference::new(item, SmolStr::new_static("wrap")).into(), N);
             let wrap_set = item.borrow().is_binding_set("wrap", false)
                 || item
@@ -978,6 +1053,21 @@ fn visit_implicit_layout_info_dependencies(
                 vis(&NamedReference::new(item, SmolStr::new_static("single-line")).into(), N);
             } else {
                 vis(&NamedReference::new(item, SmolStr::new_static("overflow")).into(), N);
+                // A line dropped by the limit is also excluded from the content widths, so
+                // `max-lines` is a dependency of both orientations, not just the height.
+                vis(&NamedReference::new(item, SmolStr::new_static("max-lines")).into(), N);
+            }
+        }
+        "StyledText" => {
+            vis(&NamedReference::new(item, SmolStr::new_static("text")).into(), N);
+            vis(&NamedReference::new(item, SmolStr::new_static("default-font-family")).into(), N);
+            vis(&NamedReference::new(item, SmolStr::new_static("default-font-size")).into(), N);
+            // A line dropped by the limit is also excluded from the content widths, so
+            // `max-lines` is a dependency of both orientations, not just the height.
+            vis(&NamedReference::new(item, SmolStr::new_static("max-lines")).into(), N);
+            if orientation == Orientation::Vertical {
+                // StyledText always word-wraps, so its height depends on the width.
+                vis(&NamedReference::new(item, SmolStr::new_static("width")).into(), N);
             }
         }
 

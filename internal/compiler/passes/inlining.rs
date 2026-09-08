@@ -7,11 +7,12 @@
 
 use crate::diagnostics::{BuildDiagnostics, Spanned};
 use crate::expression_tree::{BindingExpression, Expression, NamedReference};
-use crate::langtype::{ElementType, Type};
+use crate::langtype::{ElementType, PropertyLookupMode, Type};
 use crate::object_tree::*;
 use by_address::ByAddress;
 use smol_str::SmolStr;
 use std::cell::RefCell;
+use std::collections::btree_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -97,13 +98,29 @@ fn inline_element(
     let mut elem_mut = elem.borrow_mut();
     let priority_delta = 1 + elem_mut.inline_depth;
     elem_mut.base_type = inlined_component.root_element.borrow().base_type.clone();
-    elem_mut.property_declarations.extend(
-        inlined_component.root_element.borrow().property_declarations.iter().map(|(name, decl)| {
-            let mut decl = decl.clone();
-            decl.expose_in_public_api = false;
-            (name.clone(), decl)
-        }),
-    );
+    let Element { id: elem_id, property_declarations, .. } = &mut *elem_mut;
+    for (name, decl) in inlined_component.root_element.borrow().property_declarations.iter() {
+        match property_declarations.entry(name.clone()) {
+            // Only the functions lowered from `forward-focus` can be declared on both sides,
+            // as user code can't declare these reserved names. The derived one overrides.
+            Entry::Occupied(_) => debug_assert!(
+                crate::typeregister::reserved_member_function(name).is_some(),
+                "inlining {} into {} would merge two declarations of the same name",
+                inlined_component.id,
+                elem_id
+            ),
+            Entry::Vacant(e) => {
+                e.insert(PropertyDeclaration { expose_in_public_api: false, ..decl.clone() });
+            }
+        }
+    }
+    // Merge the shadow index, keeping the element's own shadows.
+    for (source_name, internal_name) in &inlined_component.root_element.borrow().shadowing_members {
+        elem_mut
+            .shadowing_members
+            .entry(source_name.clone())
+            .or_insert_with(|| internal_name.clone());
+    }
 
     for (p, a) in inlined_component.root_element.borrow().property_analysis.borrow().iter() {
         elem_mut.property_analysis.borrow_mut().entry(p.clone()).or_default().merge_with_base(a);
@@ -132,10 +149,11 @@ fn inline_element(
 
     // Ensure @children CIP exists if it's missing but the component is a builtin that accepts children.
     // This preserves the implicit-children behavior for builtins without explicit placeholders.
+    // Which children a builtin accepts was checked when the object tree was built, so a builtin
+    // restricted to specific child types, such as `Path`, gets the placeholder too.
     if !inlined_insertion_points.contains_key(DEFAULT_SLOT_NAME)
         && let Some(builtin) = inlined_component.root_element.borrow().builtin_type()
         && !builtin.is_non_item_type
-        && !builtin.disallow_global_types_as_child_elements
     {
         let cip_node = inlined_component
             .node
@@ -571,7 +589,9 @@ fn duplicate_element_with_mapping(
     let new = Rc::new(RefCell::new(Element {
         base_type: elem.base_type.clone(),
         id: elem.id.clone(),
+        is_injected_wrapper_element: elem.is_injected_wrapper_element,
         property_declarations: elem.property_declarations.clone(),
+        shadowing_members: elem.shadowing_members.clone(),
         // We will do the fixup of the references in bindings later
         bindings: elem
             .bindings_including_synthetic()
@@ -589,6 +609,7 @@ fn duplicate_element_with_mapping(
         debug: elem.debug.clone(),
         enclosing_component: Rc::downgrade(root_component),
         states: elem.states.clone(),
+        match_elements: Default::default(),
         transitions: elem
             .transitions
             .iter()
@@ -596,6 +617,7 @@ fn duplicate_element_with_mapping(
             .collect(),
         child_of_layout: elem.child_of_layout,
         child_of_flexbox: elem.child_of_flexbox,
+        parent_box_layout_orientation: elem.parent_box_layout_orientation,
         layout_info_prop: elem.layout_info_prop.clone(),
         layout_info_v_with_constraint: elem.layout_info_v_with_constraint.clone(),
         layout_info_h_with_constraint: elem.layout_info_h_with_constraint.clone(),
@@ -608,6 +630,7 @@ fn duplicate_element_with_mapping(
         is_flickable_content: elem.is_flickable_content,
         has_popup_child: elem.has_popup_child,
         is_tooltip: elem.is_tooltip,
+        z_order: elem.z_order.clone(),
         is_legacy_syntax: elem.is_legacy_syntax,
         inline_depth: elem.inline_depth + 1,
         slot_target: elem.slot_target.clone(),
@@ -862,12 +885,12 @@ fn fixup_element_references(expr: &mut Expression, mapping: &Mapping) {
         }
         Expression::SolveFlexboxLayout(layout) => {
             for e in &mut layout.elems {
-                fxe(&mut e.item.element);
+                fxe(&mut e.element);
             }
         }
         Expression::ComputeFlexboxLayoutInfo { layout, cross_axis_size, .. } => {
             for e in &mut layout.elems {
-                fxe(&mut e.item.element);
+                fxe(&mut e.element);
             }
             if let Some(cas) = cross_axis_size {
                 fixup_element_references(cas, mapping);
@@ -928,7 +951,8 @@ fn component_requires_inlining(component: &Rc<Component>) -> bool {
             return true;
         }
         if binding.animation.is_some() {
-            let lookup_result = root_element.borrow().lookup_property(prop);
+            let lookup_result =
+                root_element.borrow().lookup_property(prop, PropertyLookupMode::InternalName);
             if !lookup_result.is_valid()
                 || !lookup_result.is_local_to_component
                 || !matches!(

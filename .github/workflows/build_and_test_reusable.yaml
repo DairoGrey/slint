@@ -116,7 +116,7 @@ jobs:
                   cache: true
             - name: Install ffmpeg, alsa, gstreamer and libunwind (Linux)
               if: runner.os == 'Linux'
-              run: sudo timeout 300 apt-get install clang libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev libavdevice-dev libasound2-dev pkg-config libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good
+              run: sudo timeout 600 apt-get install clang libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev libavdevice-dev libasound2-dev pkg-config libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good
             - name: Setup headless display
               if: runner.os != 'macOS'
               uses: pyvista/setup-headless-display-action@v4
@@ -167,11 +167,13 @@ jobs:
               shell: bash
             # The examples and demos are also their own workspaces. The mcu/uefi
             # members need dedicated targets/features and are checked in ci.yaml.
-            # bevy and servo have heavy dependencies and dedicated workflows
-            # (bevy_examples.yaml, servo_example.yaml), so they are excluded here.
+            # bevy has heavy dependencies and a dedicated workflow
+            # (bevy_examples.yaml), so it is excluded here. The servo example is
+            # not part of the examples workspace at all and is built by
+            # servo_example.yaml.
             - name: Build examples
               if: inputs.build_examples
-              run: "cargo test --locked --verbose --all-features --workspace --timings --manifest-path examples/Cargo.toml ${{ inputs.extra_args }} --exclude mcu-board-support --exclude bevy-example --exclude bevy-hosts-slint --exclude bevy-hosts-slint-gpu --exclude servo-example"
+              run: "cargo test --locked --verbose --all-features --workspace --timings --manifest-path examples/Cargo.toml ${{ inputs.extra_args }} --exclude mcu-board-support --exclude bevy-example --exclude bevy-hosts-slint --exclude bevy-hosts-slint-gpu"
               shell: bash
             - name: Build demos
               if: inputs.build_examples

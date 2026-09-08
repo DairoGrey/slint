@@ -6,16 +6,15 @@ use std::sync::Arc;
 
 use anyrender::PaintScene;
 use i_slint_core::graphics::ResolvedBrush;
-use i_slint_core::graphics::adjust_rect_and_border_for_inner_drawing;
 use i_slint_core::graphics::euclid;
-use i_slint_core::graphics::{Image, ImageCacheKey, IntRect, SharedImageBuffer, SharedPixelBuffer};
+use i_slint_core::graphics::{Image, ImageCacheKey, SharedImageBuffer, SharedPixelBuffer};
 use i_slint_core::item_rendering::{
-    CachedRenderingData, ItemCache, ItemRenderer, RenderBorderRectangle, RenderImage,
-    RenderRectangle, RenderText,
+    BorderRectLayout, CachedRenderingData, ItemCache, ItemRenderer, RenderBorderRectangle,
+    RenderImage, RenderRectangle, RenderText,
 };
 use i_slint_core::items::{self, FillRule, ImageFit, ImageRendering, ItemRc};
 use i_slint_core::lengths::{
-    LogicalBorderRadius, LogicalLength, LogicalPoint, LogicalRect, LogicalSize, LogicalVector,
+    LogicalBorderRadius, LogicalPoint, LogicalRect, LogicalSize, LogicalVector,
     PhysicalBorderRadius, ScaleFactor, logical_size_from_api,
 };
 use i_slint_core::textlayout::sharedparley::{self, GlyphRenderer, fontique, parley};
@@ -26,13 +25,15 @@ use super::{PhysicalLength, PhysicalPoint, PhysicalRect, PhysicalSize};
 /// anyrender's `push_layer` always clips; there is no "no clip", so layers
 /// that should not clip use a rectangle larger than any real scene.
 ///
-/// Only safe for non-destructive compose modes: vello_cpu <= 0.0.9 mishandles
-/// layers with destructive compose modes (`SrcIn`, `DestOut`) whose bounds
-/// greatly exceed the viewport, losing everything beyond the first 256px
-/// wide-tile column. Bound such layers to the area they affect instead.
-/// That was fixed upstream by the frontend rewrite (linebender/vello#1701),
-/// but bounding destructive layers stays worthwhile on fixed versions too:
-/// it spares vello_cpu from compositing the entire surface.
+/// Use it only for non-destructive compose modes. Layers with a destructive
+/// mode (`SrcIn`, `DestOut`) affect every pixel the layer covers, so an
+/// oversized bound makes the backend composite the whole surface; bound them
+/// to the area they actually affect instead.
+///
+/// This used to be a correctness matter as well: vello_cpu up to 0.0.9 lost
+/// everything beyond the first 256px wide-tile column of such a layer. The
+/// frontend rewrite in vello_cpu 0.1 fixed that (linebender/vello#1701), so
+/// on the versions we build against only the cost remains.
 const UNCLIPPED: kurbo::Rect = kurbo::Rect::new(0., 0., 1e9, 1e9);
 
 #[derive(Clone, Copy)]
@@ -40,6 +41,7 @@ struct RenderState {
     clip_rect: LogicalRect,
     transform: kurbo::Affine,
     layer_count: usize,
+    alpha: f32,
 }
 
 pub struct AnyrenderItemRenderer<'a, S: PaintScene> {
@@ -103,12 +105,17 @@ impl<'a, S: PaintScene> AnyrenderItemRenderer<'a, S> {
                 ),
                 transform: initial_transform,
                 layer_count: 0,
+                alpha: 1.,
             },
         }
     }
 }
 
 impl<'a, S: PaintScene> ItemRenderer for AnyrenderItemRenderer<'a, S> {
+    fn global_alpha_transparent(&self) -> bool {
+        self.current_state.alpha == 0.0
+    }
+
     fn draw_rectangle(
         &mut self,
         rect: Pin<&dyn RenderRectangle>,
@@ -136,67 +143,31 @@ impl<'a, S: PaintScene> ItemRenderer for AnyrenderItemRenderer<'a, S> {
         size: LogicalSize,
         _: &CachedRenderingData,
     ) {
-        let mut geometry = PhysicalRect::from(size * self.scale_factor);
-        if geometry.is_empty() {
+        let Some(layout) = BorderRectLayout::new(rect, size, self.scale_factor) else {
             return;
-        }
-
-        // Save the original element bounds for gradient positioning. The CSS
-        // model positions gradients relative to the border box (full element),
-        // but adjust_rect_and_border_for_inner_drawing shrinks the geometry,
-        // which would shift the gradient center inward.
-        let brush_size = geometry.size;
-
-        let border_color = rect.border_color();
-        let opaque_border = border_color.is_opaque();
-        let mut border_width = if border_color.is_transparent() {
-            PhysicalLength::new(0.)
-        } else {
-            rect.border_width() * self.scale_factor
-        };
-
-        let mut fill_radius = rect.border_radius() * self.scale_factor;
-        // The stroke is centered on the path (50% inside, 50% outside). We want
-        // the CSS model where the border is entirely inside. Adjust the outer
-        // radius so that corners with a positive radius are at least
-        // border_width/2. This is incorrect if the radius is smaller than
-        // border_width/2, but that can't be helped - better a radius a bit
-        // too big than no radius at all.
-        let radius_epsilon = PhysicalLength::new(0.01);
-        fill_radius = fill_radius.outer(border_width / 2. + radius_epsilon);
-        let stroke_border_radius = fill_radius.inner(border_width / 2.);
-
-        let (background_shape, border_shape) = if opaque_border {
-            // When the border is opaque, the fill doesn't need to extend under it,
-            // so both fill and stroke use the same adjusted (inset) geometry.
-            adjust_rect_and_border_for_inner_drawing(&mut geometry, &mut border_width);
-            let shape = phys_rect_shape(geometry, stroke_border_radius);
-            (shape, shape)
-        } else {
-            // When the border is transparent/semi-transparent, the fill must cover
-            // the full outer rectangle so the background shows through.
-            let background_shape = phys_rect_shape(geometry, fill_radius);
-            adjust_rect_and_border_for_inner_drawing(&mut geometry, &mut border_width);
-            let border_shape = phys_rect_shape(geometry, stroke_border_radius);
-            (background_shape, border_shape)
         };
 
         let transform = self.current_state.transform;
         self.fill_with_brush(
             rect.background(),
-            brush_size,
+            layout.brush_size,
             transform,
             peniko::Fill::default(),
-            &background_shape,
+            &phys_rect_shape(layout.background_rect, layout.background_radius),
         );
 
-        if border_width.get() > 0.0 {
+        if layout.border_width.get() > 0.0 {
+            // Miter joins, not kurbo's default round ones: a round join doesn't
+            // reach into sharp corners, leaving the corner tips of the border
+            // uncovered.
+            let stroke =
+                kurbo::Stroke::new(layout.border_width.get() as f64).with_join(kurbo::Join::Miter);
             self.stroke_with_brush(
-                border_color,
-                brush_size,
+                layout.border_color,
+                layout.brush_size,
                 transform,
-                &kurbo::Stroke::new(border_width.get() as f64),
-                &border_shape,
+                &stroke,
+                &phys_rect_shape(layout.border_rect, layout.border_radius),
             );
         }
     }
@@ -599,22 +570,9 @@ impl<'a, S: PaintScene> ItemRenderer for AnyrenderItemRenderer<'a, S> {
         }
     }
 
-    fn combine_clip(
-        &mut self,
-        clip_rect: LogicalRect,
-        radius: LogicalBorderRadius,
-        border_width: LogicalLength,
-    ) -> bool {
-        let mut phys_rect = clip_rect * self.scale_factor;
-        let mut phys_border_width = border_width * self.scale_factor;
-        // In CSS the border is entirely towards the inside of the boundary
-        // geometry, so the clip applies to the region inside the border -
-        // same adjustment as the skia and femtovg renderers.
-        adjust_rect_and_border_for_inner_drawing(&mut phys_rect, &mut phys_border_width);
-
-        let adjusted_clip_rect = phys_rect / self.scale_factor;
+    fn combine_clip(&mut self, clip_rect: LogicalRect, radius: LogicalBorderRadius) -> bool {
         let clip = &mut self.current_state.clip_rect;
-        let clip_region_valid = match clip.intersection(&adjusted_clip_rect) {
+        let clip_region_valid = match clip.intersection(&clip_rect) {
             Some(r) => {
                 *clip = r;
                 true
@@ -625,7 +583,7 @@ impl<'a, S: PaintScene> ItemRenderer for AnyrenderItemRenderer<'a, S> {
             }
         };
 
-        let clip_shape = phys_rect_shape(phys_rect, radius * self.scale_factor);
+        let clip_shape = phys_rect_shape(clip_rect * self.scale_factor, radius * self.scale_factor);
 
         self.scene.push_clip_layer(self.current_state.transform, &clip_shape);
         self.current_state.layer_count += 1;
@@ -743,6 +701,7 @@ impl<'a, S: PaintScene> ItemRenderer for AnyrenderItemRenderer<'a, S> {
     }
 
     fn apply_opacity(&mut self, opacity: f32) {
+        self.current_state.alpha *= opacity;
         if opacity < 1.0 {
             // The layer is popped again by restore_state().
             self.push_unclipped_layer(peniko::BlendMode::default(), opacity);
@@ -842,10 +801,15 @@ impl<'a, S: PaintScene> GlyphRenderer for AnyrenderItemRenderer<'a, S> {
 impl<'a, S: PaintScene> AnyrenderItemRenderer<'a, S> {
     /// Draw an inset shadow.
     ///
-    /// There's no primitive for a blurred rounded rectangle that's transparent
-    /// inside and opaque outside (linebender/vello#1374).
-    /// So fill the border box with the shadow color,
-    /// then punch the blurred interior back out.
+    /// anyrender's `draw_box_shadow` paints a blurred rounded rectangle that is
+    /// opaque inside; there is no way to ask for the inverse, transparent
+    /// inside and opaque outside (linebender/vello#1374). So fill the border
+    /// box with the shadow color, then punch the blurred interior back out.
+    ///
+    /// vello_cpu 0.1 does have the primitive (the `invert` flag of
+    /// `fill_blurred_rounded_rect`), but neither anyrender's `PaintScene` nor
+    /// vello's own `draw_blurred_rounded_rect` exposes it. Once they do, this
+    /// becomes a single call.
     fn draw_inset_shadow(
         &mut self,
         color: Color,
@@ -1230,21 +1194,13 @@ fn load_image(
         ),
         ImageInner::Svg(svg) => {
             // Query target_width/height here again to ensure that changes will invalidate the item rendering cache.
-            let svg_size = svg.size();
-            let fit = i_slint_core::graphics::fit(
+            let render_size = i_slint_core::graphics::scalable_render_size(
+                svg.size(),
                 image_fit,
                 target_size_fn() * scale_factor,
-                IntRect::from_size(svg_size.cast()),
                 scale_factor,
-                Default::default(), // We only care about the size, so alignments don't matter
                 Default::default(),
-            );
-            let target_size = PhysicalSize::new(
-                svg_size.cast::<f32>().width * fit.source_to_target_x,
-                svg_size.cast::<f32>().height * fit.source_to_target_y,
-            );
-            let render_size: euclid::Size2D<u32, i_slint_core::lengths::PhysicalPx> =
-                target_size.cast();
+            )?;
             image_cache.borrow_mut().get_or_insert(
                 ImageCacheKey::new(image_inner),
                 ImageVariant::Sized { width: render_size.width, height: render_size.height },
@@ -1342,7 +1298,9 @@ fn image_buffer_to_peniko_image(buffer: &SharedImageBuffer) -> Option<peniko::Im
         SharedImageBuffer::RGB8(shared_pixel_buffer) => {
             let rgba: Vec<u8> = shared_pixel_buffer
                 .as_bytes()
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .flat_map(|rgb| [rgb[0], rgb[1], rgb[2], 255])
                 .collect();
             let width = shared_pixel_buffer.width();

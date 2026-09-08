@@ -5,7 +5,6 @@ import * as napi from "../binding.cjs";
 export {
     Diagnostic,
     DiagnosticLevel,
-    WindowEventDispatchResult,
     RgbaColor,
     Brush,
     DataTransfer,
@@ -105,9 +104,11 @@ export interface Window {
     /**
      * Dispatches a window event to the scene.
      *
-     * Returns whether the scene accepted the event, actively rejected it, or left it unhandled.
+     * Returns whether the scene accepted the event or rejected it.
      */
-    dispatchEvent(event: platform.WindowEvent): napi.WindowEventDispatchResult;
+    dispatchEvent(
+        event: platform.WindowEvent,
+    ): platform.WindowEventDispatchResult;
 }
 
 /**
@@ -395,13 +396,31 @@ function loadSlint(loadData: LoadData): Object {
                     );
                 }
 
+                // A `.slint` name may contain dashes, which JavaScript won't
+                // take as a plain identifier, so the properties and callbacks
+                // of a component are exposed under their translated name.
+                // Accept both spellings here, so that the object passed to the
+                // constructor reads like the component it initializes.
+                const componentDefinition = instance.definition();
+                const declaredName = new Map<string, string>();
+                for (const name of [
+                    ...componentDefinition.properties.map((prop) => prop.name),
+                    ...componentDefinition.callbacks,
+                ]) {
+                    declaredName.set(name, name);
+                    declaredName.set(translateName(name), name);
+                }
+
                 for (var key in properties) {
                     const value = properties[key];
+                    // Unknown names are passed through, to be reported by the
+                    // setter below.
+                    const name = declaredName.get(key) ?? key;
 
                     if (value instanceof Function) {
-                        instance.setCallback(key, value);
+                        instance.setCallback(name, value);
                     } else {
-                        instance.setProperty(key, properties[key]);
+                        instance.setProperty(name, properties[key]);
                     }
                 }
 

@@ -206,9 +206,9 @@ extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
-#[cfg(not(feature = "compat-1-2"))]
+#[cfg(not(feature = "compat-1-18"))]
 compile_error!(
-    "The feature `compat-1-2` must be enabled to ensure \
+    "The feature `compat-1-18` must be enabled to ensure \
     forward compatibility with future version of this crate"
 );
 
@@ -229,8 +229,8 @@ pub use i_slint_core::items::StandardListViewItem;
 #[deprecated(note = "Use slint::language::TableColumn instead")]
 pub use i_slint_core::items::TableColumn;
 pub use i_slint_core::model::{
-    FilterModel, MapModel, Model, ModelExt, ModelNotify, ModelPeer, ModelRc, ModelTracker,
-    ReverseModel, SortModel, VecModel,
+    FilterModel, MapModel, Model, ModelError, ModelExt, ModelNotify, ModelPeer, ModelRc,
+    ModelTracker, ReverseModel, SortModel, VecModel,
 };
 pub use i_slint_core::styled_text::StyledText;
 #[cfg(feature = "std")]
@@ -461,7 +461,7 @@ pub mod platform {
         pub use i_slint_renderer_femtovg::opengl::OpenGLInterface;
     }
 
-    /// This module contains the [`skia_renderer::SkiaWGPURenderer`] and related types.
+    /// This module contains the Skia WGPU renderers and related types.
     ///
     /// It is only enabled when the `renderer-skia` Slint feature is enabled.
     #[cfg(all(
@@ -473,6 +473,11 @@ pub mod platform {
         )
     ))]
     pub mod skia_renderer {
+        #[cfg(feature = "unstable-wgpu-29")]
+        pub use i_slint_renderer_skia::SkiaWGPU29Renderer;
+        #[cfg(feature = "unstable-wgpu-30")]
+        pub use i_slint_renderer_skia::SkiaWGPU30Renderer;
+        #[allow(deprecated)]
         pub use i_slint_renderer_skia::SkiaWGPURenderer;
     }
 
@@ -488,7 +493,7 @@ pub mod platform {
 #[i_slint_core_macros::slint_doc]
 /// This module contains some of the enums and structs from the Slint language.
 ///
-/// See also the list of [global structs and enums](slint:StructType)
+/// See also the list of [global structs and enums](slint:struct)
 pub mod language {
     macro_rules! export_builtin_structs {
         ($(
@@ -551,6 +556,10 @@ pub mod wgpu_29 {
     //! WGPU major version (29 vs 30) and the corresponding feature/selector/API names (`unstable-wgpu-29`,
     //! [`slint::BackendSelector::require_wgpu_29()`](i_slint_backend_selector::api::BackendSelector::require_wgpu_29()),
     //! [`slint::GraphicsAPI::WGPU29`](i_slint_core::api::GraphicsAPI::WGPU29)).
+    //!
+    //! When rendering offscreen with the Skia renderer, use `slint::platform::skia_renderer::SkiaWGPU29Renderer`
+    //! to select the wgpu 29 API explicitly, even if `unstable-wgpu-30` also ends up enabled through
+    //! Cargo feature unification.
     pub use i_slint_core::graphics::wgpu_29::api::*;
 }
 
@@ -713,7 +722,7 @@ pub mod winit_030 {
 
     pub use i_slint_backend_winit::{
         CustomApplicationHandler, EventLoopBuilder, EventResult, SlintEvent, WinitWindowAccessor,
-        winit,
+        invoke_from_active_event_loop, winit,
     };
 
     #[deprecated(note = "Renamed to `EventResult`")]
@@ -769,10 +778,9 @@ pub mod fontique_011 {
     /// }
     /// ```
     pub fn shared_collection() -> fontique::Collection {
-        i_slint_core::with_global_context(
-            || panic!("slint platform not initialized"),
-            |ctx| ctx.font_context().borrow().collection.clone(),
-        )
+        i_slint_backend_selector::with_global_context(|ctx| {
+            ctx.font_context().borrow().collection.clone()
+        })
         .unwrap()
     }
 }

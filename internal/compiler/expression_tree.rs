@@ -3,7 +3,8 @@
 
 use crate::diagnostics::{BuildDiagnostics, SourceLocation, Spanned};
 use crate::langtype::{
-    BuiltinElement, BuiltinStruct, EnumerationValue, Function, Keys, Struct, Type,
+    BuiltinElement, BuiltinStruct, EnumerationValue, Function, Keys, PropertyLookupMode, Struct,
+    Type,
 };
 use crate::layout::Orientation;
 use crate::lookup::LookupCtx;
@@ -24,7 +25,7 @@ pub use crate::passes::resolving;
 
 #[derive(Debug, Clone, PartialEq, Eq, strum::EnumString)]
 /// A function built into the run-time.
-/// Member functions in `builtins.slint` bind to a variant by naming it as their body.
+/// Member functions of builtin elements bind to a variant with `#[slint(builtin_function(..))]`.
 pub enum BuiltinFunction {
     GetWindowScaleFactor,
     GetWindowDefaultFontSize,
@@ -79,6 +80,7 @@ pub enum BuiltinFunction {
     StringToUppercase,
     StringStartsWith,
     StringEndsWith,
+    StringReplaceAll,
     KeysToString,
     ColorRgbaStruct,
     ColorHsvaStruct,
@@ -95,6 +97,7 @@ pub enum BuiltinFunction {
     ArrayInsert,
     ArrayAny,
     ArrayAll,
+    ArrayFindIndex,
     Rgb,
     Hsv,
     Oklch,
@@ -177,7 +180,10 @@ pub enum BuiltinMacroFunction {
     ArrayPush,
     ArrayRemove,
     ArrayInsert,
+    /// Transforms `array.index-of(value)` into `array.find-index((x) => x == value)`
+    ArrayIndexOf,
     CustomMouseCursor,
+    Spring,
 }
 
 macro_rules! declare_builtin_function_types {
@@ -248,6 +254,7 @@ declare_builtin_function_types!(
     StringToUppercase: (Type::String) -> Type::String,
     StringStartsWith: (Type::String, Type::String) -> Type::Bool,
     StringEndsWith: (Type::String, Type::String) -> Type::Bool,
+    StringReplaceAll: (Type::String, Type::String, Type::String) -> Type::String,
     KeysToString: (Type::Keys) -> Type::String,
     ImplicitLayoutInfo(..): (Type::ElementReference, Type::Float32) -> typeregister::layout_info_type().into(),
     ColorRgbaStruct: (Type::Color) -> Type::Struct(Arc::new(Struct::new(IntoIterator::into_iter([
@@ -288,6 +295,7 @@ declare_builtin_function_types!(
     ArrayInsert: (Type::Model, Type::Int32, Type::InferredProperty) -> Type::Void,
     ArrayAny: (Type::Model, Type::Closure) -> Type::Bool,
     ArrayAll: (Type::Model, Type::Closure) -> Type::Bool,
+    ArrayFindIndex: (Type::Model, Type::Closure) -> Type::Int32,
     Rgb: (Type::Int32, Type::Int32, Type::Int32, Type::Float32) -> Type::Color,
     Hsv: (Type::Float32, Type::Float32, Type::Float32, Type::Float32) -> Type::Color,
     Oklch: (Type::Float32, Type::Float32, Type::Float32, Type::Float32) -> Type::Color,
@@ -406,6 +414,7 @@ impl BuiltinFunction {
             | BuiltinFunction::StringToUppercase
             | BuiltinFunction::StringStartsWith
             | BuiltinFunction::StringEndsWith
+            | BuiltinFunction::StringReplaceAll
             | BuiltinFunction::KeysToString => true,
             BuiltinFunction::ColorRgbaStruct
             | BuiltinFunction::ColorHsvaStruct
@@ -447,7 +456,9 @@ impl BuiltinFunction {
             BuiltinFunction::MacosBringAllWindowsToFront => false,
             BuiltinFunction::PathPointAt => true,
             BuiltinFunction::PathAngleAt => true,
-            BuiltinFunction::ArrayAny | BuiltinFunction::ArrayAll => true,
+            BuiltinFunction::ArrayAny
+            | BuiltinFunction::ArrayAll
+            | BuiltinFunction::ArrayFindIndex => true,
         }
     }
 
@@ -506,6 +517,7 @@ impl BuiltinFunction {
             | BuiltinFunction::StringToUppercase
             | BuiltinFunction::StringStartsWith
             | BuiltinFunction::StringEndsWith
+            | BuiltinFunction::StringReplaceAll
             | BuiltinFunction::KeysToString => true,
             BuiltinFunction::ColorRgbaStruct
             | BuiltinFunction::ColorHsvaStruct
@@ -544,7 +556,9 @@ impl BuiltinFunction {
             BuiltinFunction::MacosBringAllWindowsToFront => false,
             BuiltinFunction::PathPointAt => true,
             BuiltinFunction::PathAngleAt => true,
-            BuiltinFunction::ArrayAny | BuiltinFunction::ArrayAll => true,
+            BuiltinFunction::ArrayAny
+            | BuiltinFunction::ArrayAll
+            | BuiltinFunction::ArrayFindIndex => true,
         }
     }
 }
@@ -1134,6 +1148,10 @@ impl Expression {
 
     /// Call the visitor for each sub-expression.  (note: this function does not recurse)
     pub fn visit(&self, mut visitor: impl FnMut(&Self)) {
+        self.visit_dyn(&mut visitor)
+    }
+
+    fn visit_dyn(&self, visitor: &mut dyn FnMut(&Self)) {
         match self {
             Expression::Invalid => {}
             Expression::Uncompiled(_) => {}
@@ -1276,6 +1294,10 @@ impl Expression {
     }
 
     pub fn visit_mut(&mut self, mut visitor: impl FnMut(&mut Self)) {
+        self.visit_mut_dyn(&mut visitor)
+    }
+
+    fn visit_mut_dyn(&mut self, visitor: &mut dyn FnMut(&mut Self)) {
         match self {
             Expression::Invalid => {}
             Expression::Uncompiled(_) => {}
@@ -1554,7 +1576,14 @@ impl Expression {
         symbol_counters: &SymbolCounters,
     ) -> Expression {
         let ty = self.ty();
-        if ty == target_type
+
+        if let Expression::Condition { .. } = self
+            && ty == Type::Void
+        {
+            // The true and false expressions do not return the same type. So at least one does not match
+            // with expected and an error was already added so we don't have to add an additional error here
+            self
+        } else if ty == target_type
             || target_type == Type::Void
             || target_type == Type::Invalid
             || ty == Type::Invalid
@@ -1584,6 +1613,48 @@ impl Expression {
                 (ref from_ty @ Type::Struct(ref left), Type::Struct(right))
                     if left.fields != right.fields =>
                 {
+                    // Slint SC converts a struct only when the source names
+                    // exactly the target's fields: no defaulting of an omitted
+                    // field and no dropping of an extra member.
+                    #[cfg(feature = "slint-sc")]
+                    if diag.slint_sc {
+                        for f in left.fields.keys() {
+                            if !right.fields.contains_key(f) {
+                                diag.slint_sc_error(
+                                    &format!("Providing the extra struct member '{f}' is"),
+                                    node,
+                                );
+                            }
+                        }
+                        for f in right.fields.keys() {
+                            if !left.fields.contains_key(f) {
+                                diag.slint_sc_error(
+                                    &format!("Omitting the struct field '{f}' is"),
+                                    node,
+                                );
+                            }
+                        }
+                    }
+                    if !diag.is_slint_sc() {
+                        let extra = left
+                            .fields
+                            .keys()
+                            .filter(|f| !right.fields.contains_key(*f))
+                            .map(|f| format!("'{f}'"))
+                            .collect::<Vec<_>>();
+                        if let Some((last, rest)) = extra.split_last() {
+                            let (noun, list) = match rest {
+                                [] => ("field", last.clone()),
+                                _ => ("fields", format!("{} and {last}", rest.join(", "))),
+                            };
+                            diag.push_warning(
+                                format!(
+                                    "Conversion to {target_type} ignores the extra {noun} {list}"
+                                ),
+                                node,
+                            );
+                        }
+                    }
                     if let Expression::Struct { mut values, .. } = self {
                         let mut new_values = BTreeMap::new();
                         for (key, ty) in &right.fields {
@@ -1690,28 +1761,69 @@ impl Expression {
                 },
                 _ => unreachable!(),
             }
-        } else if let (Type::Struct(struct_type), Expression::Struct { values, .. }) =
+        } else if let (Type::Struct(target_struct_type), Expression::Struct { values, .. }) =
             (&target_type, &self)
         {
             // Also special case struct literal in case they contain array literal
-            let mut fields = struct_type.fields.clone();
+            let mut target_fields = target_struct_type.fields.clone();
             let mut new_values = BTreeMap::new();
             for (f, v) in values {
-                if let Some(t) = fields.remove(f) {
+                if let Some(t) = target_fields.remove(f) {
                     new_values.insert(
                         f.clone(),
                         v.clone().maybe_convert_to(t, node, diag, symbol_counters),
                     );
                 } else {
-                    diag.push_error(format!("Cannot convert {ty} to {target_type}"), node);
+                    let available_fields_message = if target_struct_type.name.slint_name().is_some()
+                    {
+                        let available_fields = target_struct_type
+                            .fields
+                            .keys()
+                            .map(SmolStr::as_str)
+                            .collect::<Vec<_>>()
+                            .join("', '");
+                        format!(". Available fields: '{available_fields}'")
+                    } else {
+                        String::new()
+                    };
+                    diag.push_error(
+                        format!("Cannot convert {ty} to {target_type}: Field '{f}' not found{available_fields_message}"),
+                        node,
+                    );
                     return self;
                 }
             }
-            for f in fields.into_keys() {
-                let default_value = struct_type.default_value_for_field(&f);
+            for f in target_fields.into_keys() {
+                let default_value = target_struct_type.default_value_for_field(&f);
                 new_values.insert(f, default_value);
             }
-            Expression::Struct { ty: struct_type.clone(), values: new_values }
+            Expression::Struct { ty: target_struct_type.clone(), values: new_values }
+        } else if let Expression::Condition { condition, true_expr, false_expr } = self {
+            // Recursive try to convert the conditional expressions to the target_type
+            // true_expr and false_expr are equal this is handled with the condition at the beginning
+            // of this function so if one fails to convert, we should not try to convert the false case
+            // as well
+            let true_expr_converted = true_expr.clone().maybe_convert_to(
+                target_type.clone(),
+                node,
+                diag,
+                symbol_counters,
+            );
+            if true_expr_converted.ty() != target_type.clone() {
+                // Failed to convert so we don't have to try to convert the false expr as well
+                Expression::Condition { condition, true_expr, false_expr }
+            } else {
+                Expression::Condition {
+                    condition,
+                    true_expr: Box::new(true_expr_converted),
+                    false_expr: Box::new(false_expr.maybe_convert_to(
+                        target_type,
+                        node,
+                        diag,
+                        symbol_counters,
+                    )),
+                }
+            }
         } else {
             let mut message = format!("Cannot convert {ty} to {target_type}");
             // Explicit error message for unit conversion
@@ -1823,7 +1935,10 @@ impl Expression {
         match self {
             Expression::PropertyReference(nr) => {
                 nr.mark_as_set();
-                let mut lookup = nr.element().borrow().lookup_property(nr.name());
+                let mut lookup = nr
+                    .element()
+                    .borrow()
+                    .lookup_property(nr.name(), PropertyLookupMode::InternalName);
                 lookup.is_local_to_component &= ctx.is_local_element(&nr.element());
                 if lookup.property_visibility == PropertyVisibility::Constexpr {
                     ctx.diag.push_error(
@@ -2175,6 +2290,7 @@ pub enum EasingCurve {
     EaseInBounce,
     EaseOutBounce,
     EaseInOutBounce,
+    Spring(f32),
     // CubicBezierNonConst([Box<Expression>; 4]),
     // Custom(Box<dyn Fn(f32)->f32>),
 }

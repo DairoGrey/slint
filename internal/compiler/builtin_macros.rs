@@ -101,6 +101,9 @@ pub fn lower_macro(
         BuiltinMacroFunction::ArrayInsert => {
             array_insert_macro(n, sub_expr.collect(), diag, symbol_counters)
         }
+        BuiltinMacroFunction::ArrayIndexOf => {
+            array_index_of_macro(n, sub_expr.collect(), diag, symbol_counters)
+        }
         BuiltinMacroFunction::CustomMouseCursor => {
             let mut has_error = None;
             let hotspot_type_error = "The last two arguments to custom cursor must be an integer";
@@ -143,7 +146,35 @@ pub fn lower_macro(
 
             expr
         }
+        BuiltinMacroFunction::Spring => spring_macro(n, sub_expr.collect(), diag),
     }
+}
+
+fn spring_macro(
+    node: &dyn Spanned,
+    args: Vec<(Expression, Option<NodeOrToken>)>,
+    diag: &mut BuildDiagnostics,
+) -> Expression {
+    let literal = |e: &Expression| match e {
+        Expression::NumberLiteral(val, Unit::None) => Some(*val),
+        _ => None,
+    };
+    let bounce = match args.as_slice() {
+        [(Expression::UnaryOp { sub, op: '-' }, _)] => literal(sub).map(|v| -v),
+        [(Expression::UnaryOp { sub, op: '+' }, _)] => literal(sub),
+        [(expr, _)] => literal(expr),
+        _ => None,
+    };
+    let Some(mut bounce) = bounce else {
+        diag.push_error("The spring curve needs a single number literal argument".into(), node);
+        return Expression::EasingCurve(EasingCurve::Spring(0.));
+    };
+    if !(-1.0..=1.0).contains(&bounce) {
+        let loc = args[0].1.as_ref().map_or(node, |n| n as &dyn Spanned);
+        diag.push_error("The bounce argument to spring curve must be between -1 and 1".into(), loc);
+        bounce = 0.;
+    }
+    Expression::EasingCurve(EasingCurve::Spring(bounce as f32))
 }
 
 fn min_max_macro(
@@ -529,6 +560,59 @@ fn array_insert_macro(
         arguments: vec![model_expr, index, value],
         source_location: Some(node.to_source_location()),
     }
+}
+
+/// Unlike the other array macros, this lowers to `BuiltinFunction::ArrayFindIndex`
+/// (`array.find-index((x) => x == value)`), not a same-named builtin.
+fn array_index_of_macro(
+    node: &dyn Spanned,
+    mut args: Vec<(Expression, Option<NodeOrToken>)>,
+    diag: &mut BuildDiagnostics,
+    symbol_counters: &SymbolCounters,
+) -> Expression {
+    if args.len() != 2 {
+        diag.push_error(
+            format!("This method needs 1 argument, but {} were provided", args.len() - 1),
+            node,
+        );
+        return Expression::Invalid;
+    }
+
+    let element_type =
+        if let Type::Array(t) = args[0].0.ty() { (*t).clone() } else { Type::Invalid };
+
+    let (model_expr, _) = args.remove(0);
+    let (value_expr, value_node) = args.remove(0);
+    let value =
+        value_expr.maybe_convert_to(element_type.clone(), &value_node, diag, symbol_counters);
+
+    // Evaluate `value` once, before the search: the closure body runs once per row, so
+    // embedding `value` there directly would re-evaluate it per row instead of once.
+    let value_local = symbol_counters.generate_name("index_of_value_");
+    let arg_name = symbol_counters.generate_name("index_of_element_");
+    let predicate = Expression::Closure {
+        arg_name: arg_name.clone(),
+        expression: Box::new(Expression::BinaryExpression {
+            lhs: Box::new(Expression::ReadLocalVariable {
+                name: arg_name,
+                ty: element_type.clone(),
+            }),
+            rhs: Box::new(Expression::ReadLocalVariable {
+                name: value_local.clone(),
+                ty: element_type,
+            }),
+            op: '=',
+        }),
+    };
+
+    Expression::CodeBlock(vec![
+        Expression::StoreLocalVariable { name: value_local, value: Box::new(value) },
+        Expression::FunctionCall {
+            function: Callable::Builtin(BuiltinFunction::ArrayFindIndex),
+            arguments: vec![model_expr, predicate],
+            source_location: Some(node.to_source_location()),
+        },
+    ])
 }
 
 fn to_debug_string(

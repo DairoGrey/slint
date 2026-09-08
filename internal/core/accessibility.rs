@@ -58,7 +58,7 @@ pub enum AccessibilityAction {
     SetValue(SharedString),
     /// Select the text between two UTF-8 offsets into the element's text: the first offset is the
     /// anchor, the end that stays put, the second one the focus, the end being moved.
-    SetSelection(i32, i32),
+    SetSelectionOffsets(i32, i32),
 }
 
 bitflags! {
@@ -72,7 +72,7 @@ bitflags! {
         const Expand = 1 << 3;
         const ReplaceSelectedText = 1 << 4;
         const SetValue = 1 << 5;
-        const SetSelection = 1 << 6;
+        const SetSelectionOffsets = 1 << 6;
     }
 }
 
@@ -124,15 +124,22 @@ pub fn accessible_descendents(root_item: &ItemRc) -> impl Iterator<Item = ItemRc
 
 /// Find the first built-in `TextInput` in `item` or its descendents.
 pub fn find_text_input(item: &ItemRc) -> Option<VRcMapped<ItemTreeVTable, TextInput>> {
+    find_text_input_with_rc(item).map(|(_, input)| input)
+}
+
+/// Same as [`find_text_input`], but also returns the `TextInput`'s `ItemRc`.
+pub fn find_text_input_with_rc(
+    item: &ItemRc,
+) -> Option<(ItemRc, VRcMapped<ItemTreeVTable, TextInput>)> {
     if let Some(input) = item.clone().downcast::<TextInput>() {
-        return Some(input);
+        return Some((item.clone(), input));
     }
 
     let mut child = item.first_child();
     while let Some(candidate) = child {
         child = candidate.next_sibling();
-        if let Some(input) = find_text_input(&candidate) {
-            return Some(input);
+        if let Some(found) = find_text_input_with_rc(&candidate) {
+            return Some(found);
         }
     }
     None

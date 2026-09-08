@@ -3,27 +3,28 @@
 
 // cSpell: ignore rfind barbar funi
 
-use crate::common::component_catalog::{self, all_exported_components, all_exported_types};
-use crate::common::{self, DocumentCache};
+use crate::editor_preview::component_catalog::{self, all_exported_components, all_exported_types};
+use crate::editor_preview::editing::import_edit::{create_import_edit_impl, find_import_locations};
+use crate::editor_preview::{self, DocumentCache};
 use crate::util::{lookup_current_element_type, text_size_to_lsp_position, with_lookup_ctx};
 
 #[cfg(target_arch = "wasm32")]
-use crate::wasm_prelude::*;
+use crate::editor_preview::wasm_prelude::*;
 use i_slint_compiler::diagnostics::Spanned;
 use i_slint_compiler::expression_tree::{Callable, Expression};
-use i_slint_compiler::langtype::{ElementType, Type};
+use i_slint_compiler::langtype::{ElementType, PropertyLookupMode, Type};
 use i_slint_compiler::lookup::{LookupCtx, LookupObject, LookupResult, LookupResultCallable};
 use i_slint_compiler::object_tree::ElementRc;
 use i_slint_compiler::parser::{SyntaxKind, SyntaxNode, SyntaxToken, TextSize, syntax_nodes};
 use i_slint_compiler::typeregister::TypeRegister;
 use itertools::Itertools;
 use lsp_types::{
-    CompletionClientCapabilities, CompletionItem, CompletionItemKind, InsertTextFormat, Position,
-    Range, TextEdit,
+    CompletionClientCapabilities, CompletionItem, CompletionItemKind, InsertTextFormat, Range,
+    TextEdit,
 };
 use smol_str::SmolStr;
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::Path;
 
 /// For multi-word keywords like "in property", compute a replacement range that covers
@@ -34,7 +35,7 @@ fn multi_word_keyword_replace_range(
     t: &SyntaxToken,
     offset: TextSize,
     completion_label: &str,
-    format: common::ByteFormat,
+    format: editor_preview::ByteFormat,
 ) -> Option<Range> {
     let mut replace_start_offset = t.token.text_range().start();
     let mut current_search_token = t.token.clone();
@@ -288,6 +289,15 @@ pub(crate) fn completion_at(
         })?;
     } else if node.kind() == SyntaxKind::AtKeys {
         return with_lookup_ctx(document_cache, node, Some(offset), at_keys_completions);
+    } else if let Some(member) = syntax_nodes::ObjectMember::new(node.clone()) {
+        // Completing an object-literal field value (the value expression is still empty).
+        if let Some(colon) = member.child_token(SyntaxKind::Colon)
+            && offset >= colon.text_range().end()
+        {
+            return with_lookup_ctx(document_cache, node, Some(offset), |ctx| {
+                resolve_expression_scope(ctx, document_cache, snippet_support)
+            })?;
+        }
     } else if let Some(q) = syntax_nodes::QualifiedName::new(node.clone()) {
         match q.parent()?.kind() {
             SyntaxKind::Element => {
@@ -534,13 +544,12 @@ impl CompletionItemExt for CompletionItem {
 }
 
 /// Decide whether a reserved property should be offered as a completion in the given context.
-/// Reserved properties like row/col, flex-*, clip and drop-shadow-* are materialized on every
+/// Reserved properties like row/col, layout-order, clip and shadow properties are materialized on every
 /// item even though they only make sense on specific layout children or element types.
 fn is_reserved_prop_valid(
     prop: &str,
     element_type: &ElementType,
     parent_element_type: Option<&ElementType>,
-    enable_experimental: bool,
 ) -> bool {
     let name_of = |t: &ElementType| -> Option<SmolStr> {
         match t {
@@ -557,13 +566,17 @@ fn is_reserved_prop_valid(
     if name_in(i_slint_compiler::typeregister::RESERVED_GRIDLAYOUT_PROPERTIES) {
         return matches!(parent_name, Some("GridLayout" | "Row"));
     }
-    if prop == "flex-align-self"
-        || name_in(i_slint_compiler::typeregister::RESERVED_FLEXBOXLAYOUT_PROPERTIES)
+    if prop == "cross-axis-self-alignment"
+        || name_in(i_slint_compiler::typeregister::RESERVED_LAYOUT_CELL_PROPERTIES)
     {
-        // Not stable API yet, the compiler only accepts them as an experimental feature.
-        return enable_experimental && parent_name == Some("FlexboxLayout");
+        return matches!(
+            parent_name,
+            Some("FlexboxLayout" | "HorizontalLayout" | "VerticalLayout")
+        );
     }
-    if name_in(i_slint_compiler::typeregister::RESERVED_DROP_SHADOW_PROPERTIES) {
+    if name_in(i_slint_compiler::typeregister::RESERVED_DROP_SHADOW_PROPERTIES)
+        || name_in(i_slint_compiler::typeregister::RESERVED_INNER_SHADOW_PROPERTIES)
+    {
         return name_of(element_type).as_deref() == Some("Rectangle");
     }
     match prop {
@@ -584,7 +597,6 @@ fn properties_for_changed_callbacks(
         }
         node = node.parent()?;
     };
-    let enable_experimental = document_cache.compiler_configuration().enable_experimental;
     let global_tr = document_cache.global_type_registry();
     let tr = element
         .source_file()
@@ -615,12 +627,7 @@ fn properties_for_changed_callbacks(
             if !ty.is_property_type() {
                 return None;
             }
-            if !is_reserved_prop_valid(
-                k,
-                &element_type,
-                parent_element_type.as_ref(),
-                enable_experimental,
-            ) {
+            if !is_reserved_prop_valid(k, &element_type, parent_element_type.as_ref()) {
                 return None;
             }
             let mut c = CompletionItem::new_simple(k.into(), ty.to_string());
@@ -652,7 +659,6 @@ fn resolve_element_scope(
             }
         };
 
-    let enable_experimental = document_cache.compiler_configuration().enable_experimental;
     let global_tr = document_cache.global_type_registry();
     let tr = element
         .source_file()
@@ -661,6 +667,36 @@ fn resolve_element_scope(
         .unwrap_or(&global_tr);
     let element_type = lookup_current_element_type((*element).clone(), tr).unwrap_or_default();
     let parent_element_type = element.parent().and_then(|p| lookup_current_element_type(p, tr));
+    // Members declared on this element, offered as-is; an inherited member of the same name is
+    // dropped below so the name isn't offered twice.
+    let local_declarations = element
+        .PropertyDeclaration()
+        .filter_map(|pr| {
+            let name = pr.DeclaredIdentifier().child_text(SyntaxKind::Identifier)?;
+            Some(
+                CompletionItem::new_simple(
+                    name.to_string(),
+                    pr.Type().map(|t| t.text().into()).unwrap_or_else(|| "property".to_owned()),
+                )
+                .with_kind(CompletionItemKind::PROPERTY)
+                .with_sort_text(format!("#{name}"))
+                .with_insert_text(format!("{name}: "), with_snippets),
+            )
+        })
+        .chain(element.CallbackDeclaration().filter_map(|cd| {
+            let name = cd.DeclaredIdentifier().child_text(SyntaxKind::Identifier)?;
+            Some(
+                CompletionItem::new_simple(name.to_string(), "callback".into())
+                    .with_kind(CompletionItemKind::METHOD)
+                    .with_sort_text(format!("#{name}"))
+                    .with_insert_text(format!("{name} => {{$1}}"), with_snippets),
+            )
+        }))
+        .collect::<Vec<_>>();
+    let shadowing_names: std::collections::HashSet<SmolStr> = local_declarations
+        .iter()
+        .map(|c| i_slint_compiler::parser::normalize_identifier(&c.label))
+        .collect();
     let mut result = element_type
         .property_list()
         .into_iter()
@@ -668,7 +704,10 @@ fn resolve_element_scope(
             if matches!(ty, Type::Function { .. }) {
                 return false;
             }
-            let mut lk = element_type.lookup_property(k);
+            if shadowing_names.contains(&i_slint_compiler::parser::normalize_identifier(k)) {
+                return false;
+            }
+            let mut lk = element_type.lookup_property(k, PropertyLookupMode::ComponentLocal);
             lk.is_local_to_component = false;
             lk.is_valid_for_assignment()
         })
@@ -691,27 +730,7 @@ fn resolve_element_scope(
             c.sort_text = Some(format!("#{}", c.label));
             apply_property_ty(c, &ty, cb_args)
         })
-        .chain(element.PropertyDeclaration().filter_map(|pr| {
-            let name = pr.DeclaredIdentifier().child_text(SyntaxKind::Identifier)?;
-            Some(
-                CompletionItem::new_simple(
-                    name.to_string(),
-                    pr.Type().map(|t| t.text().into()).unwrap_or_else(|| "property".to_owned()),
-                )
-                .with_kind(CompletionItemKind::PROPERTY)
-                .with_sort_text(format!("#{name}"))
-                .with_insert_text(format!("{name}: "), with_snippets),
-            )
-        }))
-        .chain(element.CallbackDeclaration().filter_map(|cd| {
-            let name = cd.DeclaredIdentifier().child_text(SyntaxKind::Identifier)?;
-            Some(
-                CompletionItem::new_simple(name.to_string(), "callback".into())
-                    .with_kind(CompletionItemKind::METHOD)
-                    .with_sort_text(format!("#{name}"))
-                    .with_insert_text(format!("{name} => {{$1}}"), with_snippets),
-            )
-        }))
+        .chain(local_declarations)
         .collect::<Vec<_>>();
 
     if !matches!(element_type, ElementType::Global) {
@@ -759,12 +778,7 @@ fn resolve_element_scope(
                     if matches!(ty, Type::Function { .. }) {
                         return None;
                     }
-                    if !is_reserved_prop_valid(
-                        k,
-                        &element_type,
-                        parent_element_type.as_ref(),
-                        enable_experimental,
-                    ) {
+                    if !is_reserved_prop_valid(k, &element_type, parent_element_type.as_ref()) {
                         return None;
                     }
                     let c = CompletionItem::new_simple(k.into(), ty.to_string());
@@ -807,7 +821,7 @@ fn de_normalize_property_name<'a>(element_type: &ElementType, prop: &'a str) -> 
 
 // Same as de_normalize_property_name, but use a `ElementRc`
 fn de_normalize_property_name_with_element<'a>(element: &ElementRc, prop: &'a str) -> Cow<'a, str> {
-    if let Some(d) = element.borrow().property_declarations.get(prop) {
+    if let Some((_, d)) = element.borrow().declaration(prop) {
         d.node
             .as_ref()
             .and_then(|n| n.child_node(SyntaxKind::DeclaredIdentifier))
@@ -820,7 +834,7 @@ fn de_normalize_property_name_with_element<'a>(element: &ElementRc, prop: &'a st
 
 fn resolve_expression_scope(
     lookup_context: &LookupCtx,
-    document_cache: &common::DocumentCache,
+    document_cache: &editor_preview::DocumentCache,
     snippet_support: bool,
 ) -> Option<Vec<CompletionItem>> {
     let mut r = Vec::new();
@@ -839,7 +853,7 @@ fn resolve_expression_scope(
         build_component_import_statements_edits(
             &token,
             document_cache,
-            &mut |ci: &common::ComponentInformation| {
+            &mut |ci: &editor_preview::component_catalog::ComponentInformation| {
                 if !ci.is_global || !ci.is_exported || available_types.contains(&ci.name) {
                     false
                 } else {
@@ -1084,7 +1098,7 @@ fn complete_path_in_string(
 fn resolve_implement_interface_name_scope(
     node: &SyntaxNode,
     token: &SyntaxToken,
-    document_cache: &common::DocumentCache,
+    document_cache: &editor_preview::DocumentCache,
     snippet_support: bool,
 ) -> Option<Vec<CompletionItem>> {
     let global_type_register = document_cache.global_type_registry();
@@ -1151,7 +1165,7 @@ fn collect_child_ids(element: &syntax_nodes::Element, result: &mut Vec<Completio
 
 fn add_interfaces_to_import(
     token: &SyntaxToken,
-    document_cache: &common::DocumentCache,
+    document_cache: &editor_preview::DocumentCache,
     result: &mut Vec<CompletionItem>,
 ) {
     let available_types: HashSet<_> =
@@ -1159,7 +1173,7 @@ fn add_interfaces_to_import(
     build_component_import_statements_edits(
         token,
         document_cache,
-        &mut |component: &common::ComponentInformation| {
+        &mut |component: &editor_preview::component_catalog::ComponentInformation| {
             component.is_interface
                 && component.is_exported
                 && !available_types.contains(&component.name)
@@ -1185,14 +1199,14 @@ fn add_interfaces_to_import(
 /// import and should already be in result
 fn add_components_to_import(
     token: &SyntaxToken,
-    document_cache: &common::DocumentCache,
+    document_cache: &editor_preview::DocumentCache,
     result: &mut Vec<CompletionItem>,
 ) {
     let available_types: HashSet<_> = result.iter().map(|c| c.label.clone()).collect();
     build_component_import_statements_edits(
         token,
         document_cache,
-        &mut |component: &common::ComponentInformation| {
+        &mut |component: &editor_preview::component_catalog::ComponentInformation| {
             !component.is_global
                 && !component.is_interface
                 && component.is_exported
@@ -1223,14 +1237,16 @@ fn add_components_to_import(
 /// mirroring the same pattern used by [`add_components_to_import`] for elements.
 fn add_types_to_import(
     token: &SyntaxToken,
-    document_cache: &common::DocumentCache,
+    document_cache: &editor_preview::DocumentCache,
     result: &mut Vec<CompletionItem>,
 ) {
     let available_types: HashSet<_> = result.iter().map(|c| c.label.clone()).collect();
     build_type_import_statements_edits(
         token,
         document_cache,
-        &mut |type_info: &common::TypeInformation| !available_types.contains(&type_info.name),
+        &mut |type_info: &editor_preview::component_catalog::TypeInformation| {
+            !available_types.contains(&type_info.name)
+        },
         &mut |type_info, exported_name, file, the_import| {
             result.push(CompletionItem {
                 label: format!("{exported_name} (import from \"{file}\")"),
@@ -1245,119 +1261,6 @@ fn add_types_to_import(
     );
 }
 
-/// Find the insert location for new imports in the `document`
-///
-/// The result is a tuple with the first element pointing to the place new import statements should
-/// get added. The second element in the tuple is a HashMap mapping import file names to the
-/// correct location to enter more components into the existing import statement.
-fn find_import_locations(
-    document: &syntax_nodes::Document,
-    format: common::ByteFormat,
-) -> (Position, HashMap<String, Position>) {
-    let mut import_locations = HashMap::new();
-    let mut last = 0u32;
-    for import in document.ImportSpecifier() {
-        if let Some((loc, file)) = import.ImportIdentifierList().and_then(|list| {
-            let node = list.ImportIdentifier().last()?;
-            let id = crate::util::last_non_ws_token(&node).or_else(|| node.first_token())?;
-            Some((
-                text_size_to_lsp_position(id.source_file()?, id.text_range().end(), format),
-                import.child_token(SyntaxKind::StringLiteral)?,
-            ))
-        }) {
-            import_locations.insert(file.text().to_string().trim_matches('\"').to_string(), loc);
-        }
-        last = import.text_range().end().into();
-    }
-
-    let new_import_position = if last == 0 {
-        // There are currently no input statement, place it at the location of the first non-empty token.
-        // This should also work in the slint! macro.
-        // consider this file:  We want to insert before the doc1 position
-        // ```
-        // //not doc (eg, license header)
-        //
-        // //doc1
-        // //doc2
-        // component Foo {
-        // ```
-        let mut offset = None;
-        for it in document.children_with_tokens() {
-            match it.kind() {
-                SyntaxKind::Comment => {
-                    if offset.is_none() {
-                        offset = Some(it.text_range().start());
-                    }
-                }
-                SyntaxKind::Whitespace => {
-                    // Single newline is just considered part of the comment
-                    // but more new lines means it splits that comment
-                    if it.as_token().unwrap().text() != "\n" {
-                        offset = None;
-                    }
-                }
-                _ => {
-                    if offset.is_none() {
-                        offset = Some(it.text_range().start());
-                    }
-                    break;
-                }
-            }
-        }
-        text_size_to_lsp_position(&document.source_file, offset.unwrap_or_default(), format)
-    } else {
-        Position::new(
-            text_size_to_lsp_position(&document.source_file, last.into(), format).line + 1,
-            0,
-        )
-    };
-
-    (new_import_position, import_locations)
-}
-
-fn create_import_edit_impl(
-    component: &str,
-    import_path: &str,
-    missing_import_location: &Position,
-    known_import_locations: &HashMap<String, Position>,
-) -> TextEdit {
-    known_import_locations.get(import_path).map_or_else(
-        || {
-            TextEdit::new(
-                Range::new(*missing_import_location, *missing_import_location),
-                format!("import {{ {component} }} from \"{import_path}\";\n"),
-            )
-        },
-        |pos| TextEdit::new(Range::new(*pos, *pos), format!(", {component}")),
-    )
-}
-
-/// Creates a text edit
-#[cfg(feature = "preview-engine")]
-pub fn create_import_edit(
-    document: &i_slint_compiler::object_tree::Document,
-    component: &str,
-    import_path: &Option<String>,
-    format: common::ByteFormat,
-) -> Option<TextEdit> {
-    let import_path = import_path.as_ref()?;
-    let doc_node = document.node.as_ref().unwrap();
-
-    if document.local_registry.lookup_element(component).is_ok() {
-        None // already known, no import needed
-    } else {
-        let (missing_import_location, known_import_locations) =
-            find_import_locations(doc_node, format);
-
-        Some(create_import_edit_impl(
-            component,
-            import_path,
-            &missing_import_location,
-            &known_import_locations,
-        ))
-    }
-}
-
 /// Try to generate `import { XXX } from "foo.slint";` for every component
 ///
 /// This is used for auto-completion and also for fixup diagnostics
@@ -1365,8 +1268,8 @@ pub fn create_import_edit(
 /// Call `add_edit` with the component name and file name and TextEdit for every component for which the `filter` callback returns true
 pub fn build_component_import_statements_edits(
     token: &SyntaxToken,
-    document_cache: &common::DocumentCache,
-    filter: &mut dyn FnMut(&common::ComponentInformation) -> bool,
+    document_cache: &editor_preview::DocumentCache,
+    filter: &mut dyn FnMut(&editor_preview::component_catalog::ComponentInformation) -> bool,
     add_edit: &mut dyn FnMut(&str, &str, TextEdit),
 ) -> Option<()> {
     // Find out types that can be imported
@@ -1424,9 +1327,14 @@ fn build_import_statements_edits<T>(
 /// Call `add_edit` with the type name, file name, and `TextEdit` for every matching type.
 pub fn build_type_import_statements_edits(
     token: &SyntaxToken,
-    document_cache: &common::DocumentCache,
-    filter: &mut dyn FnMut(&common::TypeInformation) -> bool,
-    add_edit: &mut dyn FnMut(&common::TypeInformation, &str, &str, TextEdit),
+    document_cache: &editor_preview::DocumentCache,
+    filter: &mut dyn FnMut(&editor_preview::component_catalog::TypeInformation) -> bool,
+    add_edit: &mut dyn FnMut(
+        &editor_preview::component_catalog::TypeInformation,
+        &str,
+        &str,
+        TextEdit,
+    ),
 ) -> Option<()> {
     let current_file = token.source_file.path().to_owned();
     let current_uri = lsp_types::Url::from_file_path(&current_file).ok();
@@ -1509,6 +1417,7 @@ fn at_keys_completions(ctx: &mut LookupCtx) -> Vec<CompletionItem> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lsp_types::Position;
 
     /// Given a source text containing the unicode emoji `🔺`, the emoji will be removed and then an autocompletion request will be done as if the cursor was there
     fn get_completions(file: &str) -> Option<Vec<CompletionItem>> {
@@ -1716,9 +1625,10 @@ mod tests {
         assert_eq!(res.iter().find(|ci| ci.label == "pressed"), None);
         assert_eq!(res.iter().find(|ci| ci.label == "pressed-x"), None);
         assert!(!res.iter().any(|ci| ci.label == "row"));
-        assert!(!res.iter().any(|ci| ci.label == "flex-grow"));
+        assert!(!res.iter().any(|ci| ci.label == "layout-order"));
         assert!(!res.iter().any(|ci| ci.label == "clip"));
         assert!(!res.iter().any(|ci| ci.label == "drop-shadow-blur"));
+        assert!(!res.iter().any(|ci| ci.label == "inner-shadow-blur"));
 
         // elements
         let class = Some(CompletionItemKind::CLASS);
@@ -1788,9 +1698,10 @@ mod tests {
         assert_eq!(res.iter().find(|ci| ci.label == "has-focus"), None);
         assert_eq!(res.iter().find(|ci| ci.label == "func"), None);
         assert!(!res.iter().any(|ci| ci.label == "row"));
-        assert!(!res.iter().any(|ci| ci.label == "flex-grow"));
+        assert!(!res.iter().any(|ci| ci.label == "layout-order"));
         assert!(!res.iter().any(|ci| ci.label == "clip"));
         assert!(!res.iter().any(|ci| ci.label == "drop-shadow-blur"));
+        assert!(!res.iter().any(|ci| ci.label == "inner-shadow-blur"));
 
         // elements
         let class = Some(CompletionItemKind::CLASS);
@@ -1805,6 +1716,22 @@ mod tests {
         let res = get_completions(
             r#"
             component Foo {
+                Rectangle {
+                    🔺
+                }
+            }
+        "#,
+        )
+        .unwrap();
+        assert!(res.iter().any(|ci| ci.label == "drop-shadow-blur"));
+        assert!(res.iter().any(|ci| ci.label == "drop-shadow-spread"));
+        assert!(res.iter().any(|ci| ci.label == "inner-shadow-blur"));
+        assert!(res.iter().any(|ci| ci.label == "inner-shadow-spread"));
+        assert!(res.iter().any(|ci| ci.label == "inner-shadow-color"));
+
+        let res = get_completions(
+            r#"
+            component Foo {
                 GridLayout {
                     🔺
                 }
@@ -1816,8 +1743,8 @@ mod tests {
         assert!(res.iter().any(|ci| ci.label == "spacing-horizontal"));
         assert!(res.iter().any(|ci| ci.label == "spacing-vertical"));
         assert!(res.iter().any(|ci| ci.label == "padding"));
-        assert!(!res.iter().any(|ci| ci.label == "flex-grow"));
-        assert!(!res.iter().any(|ci| ci.label == "flex-align-self"));
+        assert!(!res.iter().any(|ci| ci.label == "layout-order"));
+        assert!(!res.iter().any(|ci| ci.label == "cross-axis-self-alignment"));
     }
 
     #[test]
@@ -2095,6 +2022,88 @@ mod tests {
     }
 
     #[test]
+    fn expected_type_comparison_rhs() {
+        // A bare enum value / color resolves against the type of the comparison's left-hand
+        // side, so completion offers the matching values after `==`.
+        let source = r#"
+            enum Direction { up, down, forward }
+            component Foo {
+                in property <Direction> dir;
+                in property <color> col;
+                out property <bool> b1: dir == 🔺;
+            }
+        "#;
+        let res = get_completions(source).unwrap();
+        res.iter().find(|ci| ci.label == "up").unwrap();
+        res.iter().find(|ci| ci.label == "down").unwrap();
+        res.iter().find(|ci| ci.label == "forward").unwrap();
+        // The left-hand side is an enum, so colors must not be offered here.
+        assert!(!res.iter().any(|ci| ci.label == "red"));
+
+        let source = r#"
+            component Foo {
+                in property <color> fg;
+                out property <bool> b1: fg != 🔺;
+            }
+        "#;
+        let res = get_completions(source).unwrap();
+        res.iter().find(|ci| ci.label == "red").unwrap();
+        res.iter().find(|ci| ci.label == "blue").unwrap();
+    }
+
+    #[test]
+    fn expected_type_call_argument() {
+        // A bare enum value resolves against the parameter type at its argument position.
+        let source = r#"
+            enum Direction { up, down, forward }
+            component Foo {
+                callback cb(int, Direction);
+                callback trigger;
+                trigger => { cb(1, 🔺) }
+            }
+        "#;
+        let res = get_completions(source).unwrap();
+        res.iter().find(|ci| ci.label == "up").unwrap();
+        res.iter().find(|ci| ci.label == "forward").unwrap();
+
+        // First argument is an int, so the enum values must not leak into that position.
+        let source = r#"
+            enum Direction { up, down, forward }
+            component Foo {
+                callback cb(int, Direction);
+                callback trigger;
+                trigger => { cb(🔺, up) }
+            }
+        "#;
+        let res = get_completions(source).unwrap();
+        assert!(!res.iter().any(|ci| ci.label == "up"));
+    }
+
+    #[test]
+    fn expected_type_struct_field_and_array() {
+        // Struct-literal field values and array elements resolve against the field/element type.
+        let source = r#"
+            enum Direction { up, down, forward }
+            struct S { dir: Direction, count: int }
+            component Foo {
+                in property <S> s: { dir: 🔺 };
+            }
+        "#;
+        let res = get_completions(source).unwrap_or_default();
+        res.iter().find(|ci| ci.label == "up").unwrap();
+        res.iter().find(|ci| ci.label == "forward").unwrap();
+
+        let source = r#"
+            component Foo {
+                in property <[color]> cols: [red, 🔺];
+            }
+        "#;
+        let res = get_completions(source).unwrap();
+        res.iter().find(|ci| ci.label == "blue").unwrap();
+        res.iter().find(|ci| ci.label == "green").unwrap();
+    }
+
+    #[test]
     fn function_calls() {
         let source = r#"
             component Foo {
@@ -2114,7 +2123,7 @@ mod tests {
             ("add(..)", "add(${1:a}, ${2:b})"),
             ("caller()", "caller()"),
             ("clear-focus()", "clear-focus()"),
-            ("set-selection-offsets(..)", "set-selection-offsets(${1:start}, ${2:end})"),
+            ("set-selection-offsets(..)", "set-selection-offsets(${1:anchor}, ${2:focus})"),
             ("my-callback(..)", "my-callback(${1:hello}, ${2:world})"),
         ]
         .map(|(label, insert_text)| CompletionItem {
@@ -2588,7 +2597,7 @@ mod tests {
     }
 
     fn get_completions_multi_file_with(
-        mut dc: common::DocumentCache,
+        mut dc: editor_preview::DocumentCache,
         types_file_name: &str,
         types_content: &str,
         main_file_name: &str,
@@ -2605,7 +2614,8 @@ mod tests {
         let mut diagnostics = BuildDiagnostics::default();
 
         let types_url =
-            Url::from_file_path(crate::common::test::test_file_name(types_file_name)).unwrap();
+            Url::from_file_path(crate::editor_preview::test::test_file_name(types_file_name))
+                .unwrap();
         let _ = spin_on::spin_on(dc.load_url(
             &types_url,
             Some(1),
@@ -2614,7 +2624,8 @@ mod tests {
         ));
 
         let main_url =
-            Url::from_file_path(crate::common::test::test_file_name(main_file_name)).unwrap();
+            Url::from_file_path(crate::editor_preview::test::test_file_name(main_file_name))
+                .unwrap();
         let _ = spin_on::spin_on(dc.load_url(
             &main_url,
             Some(2),
@@ -2737,6 +2748,68 @@ export component TestWindow inherits Window {
             results.iter().find(|completion| completion.label == "MyInterface").unwrap();
         assert_eq!(completion.kind, Some(CompletionItemKind::INTERFACE));
         assert!(!results.iter().any(|completion| completion.label == "NotAnInterface"));
+    }
+
+    #[test]
+    fn shadowed_member_dot_completion_type() {
+        let source = r#"
+            component Base {
+                @shadowable in-out property <int> prop;
+            }
+            component Derived inherits Base {
+                in-out property <string> prop;
+            }
+            export component Main {
+                foo := Derived { }
+                the-text := Text {
+                    text: foo.pr🔺;
+                }
+            }
+        "#;
+        let results = get_completions_experimental(source).unwrap();
+        let prop = results.iter().find(|c| c.label == "prop").unwrap();
+        assert_eq!(prop.detail.as_deref(), Some("string"), "should show the overriding type");
+    }
+
+    #[test]
+    fn private_shadow_is_transparent_in_completion() {
+        // A private declaration shadowing a public `@shadowable` member is invisible from outside
+        // the component, so `foo.` completion offers the inherited public member (with its type).
+        let source = r#"
+            component Base {
+                @shadowable in-out property <int> prop;
+            }
+            component Derived inherits Base {
+                private property <string> prop;
+            }
+            export component Main {
+                foo := Derived { }
+                the-text := Text {
+                    text: foo.pr🔺;
+                }
+            }
+        "#;
+        let results = get_completions_experimental(source).unwrap();
+        let prop = results.iter().find(|c| c.label == "prop").expect("'prop' should be offered");
+        assert_eq!(prop.detail.as_deref(), Some("int"), "should show the inherited public type");
+    }
+
+    #[test]
+    fn shadowed_member_completed_once() {
+        // A member that shadows an inherited one must be offered a single time, not once for the
+        // inherited declaration and once for the shadow.
+        let source = r#"
+            component Base {
+                @shadowable in-out property <int> prop;
+            }
+            export component Derived inherits Base {
+                in-out property <string> prop;
+                pro🔺
+            }
+        "#;
+        let results = get_completions_experimental(source).unwrap();
+        let count = results.iter().filter(|c| c.label == "prop").count();
+        assert_eq!(count, 1, "'prop' should be completed exactly once");
     }
 
     #[test]
@@ -2927,32 +3000,60 @@ component Foo {
     }
 
     #[test]
-    fn flex_item_properties_require_experimental() {
-        let source = r#"
-export component Foo {
-    FlexboxLayout {
-        Rectangle {
+    fn layout_cell_properties_in_layouts() {
+        for layout in ["FlexboxLayout", "HorizontalLayout", "VerticalLayout"] {
+            let source = format!(
+                r#"
+component Foo {{
+    {layout} {{
+        Rectangle {{
             🔺
+        }}
+    }}
+}}
+"#
+            );
+            let results = get_completions(&source).unwrap();
+            for prop in ["layout-order", "cross-axis-self-alignment"] {
+                assert!(
+                    results.iter().any(|completion| completion.label == prop),
+                    "no '{prop}' completion in a {layout}"
+                );
+            }
         }
     }
-}
-"#;
-        let results = get_completions_experimental(source).unwrap();
-        // flex-align-self is registered separately from the other four, so check each one.
-        for prop in
-            ["flex-grow", "flex-shrink", "flex-basis", "flex-align-self", "flex-order"].iter()
-        {
-            assert!(
-                results.iter().any(|completion| completion.label == *prop),
-                "no '{prop}' completion with experimental features"
-            );
-        }
 
-        let results = get_completions(source).unwrap();
-        assert!(
-            !results.iter().any(|completion| completion.label.starts_with("flex-")),
-            "flex-* completions offered without experimental features"
-        );
+    #[test]
+    fn no_auto_completion_for_cross_axis_alignment() {
+        // `auto` cannot be set on `cross-axis-alignment`, so don't offer it there,
+        // neither as a bare value nor after `CrossAxisAlignment.`
+        for (binding, has_auto) in [
+            ("cross-axis-alignment: @value Rectangle {}", false),
+            ("Rectangle { cross-axis-self-alignment: @value }", true),
+        ] {
+            for value in ["🔺", "CrossAxisAlignment.🔺"] {
+                let binding = binding.replace("@value", value);
+                let source = format!(
+                    r#"
+component Foo {{
+    VerticalLayout {{
+        {binding}
+    }}
+}}
+"#
+                );
+                let results = get_completions(&source).unwrap();
+                assert_eq!(
+                    results.iter().any(|completion| completion.label == "auto"),
+                    has_auto,
+                    "wrong 'auto' completion in `{binding}`"
+                );
+                assert!(
+                    results.iter().any(|completion| completion.label == "center"),
+                    "no 'center' completion in `{binding}`"
+                );
+            }
+        }
     }
 
     #[test]

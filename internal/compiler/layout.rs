@@ -5,10 +5,10 @@
 
 use crate::diagnostics::{BuildDiagnostics, DiagnosticLevel, Spanned};
 use crate::expression_tree::*;
-use crate::langtype::{ElementType, PropertyLookupResult, Type};
+use crate::langtype::{ElementType, PropertyLookupMode, PropertyLookupResult, Type};
 use crate::object_tree::{Component, ElementRc};
 
-use smol_str::{SmolStr, ToSmolStr, format_smolstr};
+use smol_str::{SmolStr, ToSmolStr};
 
 use std::cell::RefCell;
 use std::rc::{Rc, Weak};
@@ -64,7 +64,7 @@ pub enum Layout {
 
 impl Layout {
     /// Call the visitor for each NamedReference stored in the layout
-    pub fn visit_named_references(&mut self, visitor: &mut impl FnMut(&mut NamedReference)) {
+    pub fn visit_named_references(&mut self, visitor: &mut dyn FnMut(&mut NamedReference)) {
         match self {
             Layout::GridLayout(grid) => grid.visit_named_references(visitor),
             Layout::BoxLayout(l) => l.visit_named_references(visitor),
@@ -78,17 +78,12 @@ impl Layout {
 pub struct LayoutItem {
     pub element: ElementRc,
     pub constraints: LayoutConstraints,
-}
-
-/// A FlexboxLayout child item, wrapping a LayoutItem with flex-specific properties.
-#[derive(Debug, Clone)]
-pub struct FlexboxLayoutItem {
-    pub item: LayoutItem,
-    pub flex_grow: Option<NamedReference>,
-    pub flex_shrink: Option<NamedReference>,
-    pub flex_basis: Option<NamedReference>,
-    pub align_self: Option<NamedReference>,
-    pub order: Option<NamedReference>,
+    /// The `cross-axis-self-alignment` property, if set.
+    /// Used by box layouts and FlexboxLayout; always `None` in a GridLayout.
+    pub cross_axis_self_alignment: Option<NamedReference>,
+    /// The `layout-order` property, if set.
+    /// Used by box layouts and FlexboxLayout; always `None` in a GridLayout.
+    pub layout_order: Option<NamedReference>,
 }
 
 /// A child within a repeated Row in a GridLayout.
@@ -133,8 +128,10 @@ impl RowChildTemplate {
 impl LayoutItem {
     pub fn rect(&self) -> LayoutRect {
         let p = |unresolved_name: &str| {
-            let PropertyLookupResult { resolved_name, property_type, .. } =
-                self.element.borrow().lookup_property(unresolved_name);
+            let PropertyLookupResult { resolved_name, property_type, .. } = self
+                .element
+                .borrow()
+                .lookup_property(unresolved_name, PropertyLookupMode::ComponentLocal);
             if property_type == Type::LogicalLength {
                 Some(NamedReference::new(&self.element, resolved_name.to_smolstr()))
             } else {
@@ -171,7 +168,7 @@ impl LayoutRect {
         }
     }
 
-    fn visit_named_references(&mut self, mut visitor: &mut impl FnMut(&mut NamedReference)) {
+    fn visit_named_references(&mut self, mut visitor: &mut dyn FnMut(&mut NamedReference)) {
         self.width_reference.as_mut().map(&mut visitor);
         self.height_reference.as_mut().map(&mut visitor);
         self.x_reference.as_mut().map(&mut visitor);
@@ -423,7 +420,7 @@ impl LayoutConstraints {
             .chain(c.stretch.as_ref().map(|x| (x, "stretch")))
     }
 
-    pub fn visit_named_references(&mut self, visitor: &mut impl FnMut(&mut NamedReference)) {
+    pub fn visit_named_references(&mut self, visitor: &mut dyn FnMut(&mut NamedReference)) {
         if let Some(e) = self.max_width.as_mut() {
             visitor(&mut *e);
         }
@@ -466,10 +463,17 @@ pub struct GridLayoutCell {
     pub colspan_expr: RowColExpr,
     pub rowspan_expr: RowColExpr,
     pub child_items: Option<Vec<RowChildTemplate>>, // for repeated rows
+    /// Set on every cell of a grid whose horizontal solve can read back into
+    /// its vertical cache, i.e. one holding a repeated width-for-height cell.
+    /// The vertical pass must then not measure repeated cells at their solved
+    /// column width, because reading the horizontal cache would close a
+    /// binding loop. Computed by `mark_grid_h_solve_reads_v_cache`, which runs
+    /// once the `layoutinfo-h-with-constraint` functions exist.
+    pub h_solve_reads_v_cache: bool,
 }
 
 impl GridLayoutCell {
-    pub fn visit_named_references(&mut self, visitor: &mut impl FnMut(&mut NamedReference)) {
+    pub fn visit_named_references(&mut self, visitor: &mut dyn FnMut(&mut NamedReference)) {
         if let RowColExpr::Named(ref mut e) = self.col_expr {
             visitor(e);
         }
@@ -517,7 +521,7 @@ pub struct Padding {
 }
 
 impl Padding {
-    fn visit_named_references(&mut self, visitor: &mut impl FnMut(&mut NamedReference)) {
+    fn visit_named_references(&mut self, visitor: &mut dyn FnMut(&mut NamedReference)) {
         if let Some(e) = self.left.as_mut() {
             visitor(&mut *e)
         }
@@ -548,7 +552,7 @@ pub struct Spacing {
 }
 
 impl Spacing {
-    fn visit_named_references(&mut self, visitor: &mut impl FnMut(&mut NamedReference)) {
+    fn visit_named_references(&mut self, visitor: &mut dyn FnMut(&mut NamedReference)) {
         if let Some(e) = self.horizontal.as_mut() {
             visitor(&mut *e);
         }
@@ -574,7 +578,7 @@ pub struct LayoutGeometry {
 }
 
 impl LayoutGeometry {
-    pub fn visit_named_references(&mut self, visitor: &mut impl FnMut(&mut NamedReference)) {
+    pub fn visit_named_references(&mut self, visitor: &mut dyn FnMut(&mut NamedReference)) {
         self.rect.visit_named_references(visitor);
         if let Some(e) = self.alignment.as_mut() {
             visitor(&mut *e)
@@ -694,7 +698,7 @@ impl GridLayout {
         }
     }
 
-    pub fn visit_rowcol_named_references(&mut self, visitor: &mut impl FnMut(&mut NamedReference)) {
+    pub fn visit_rowcol_named_references(&mut self, visitor: &mut dyn FnMut(&mut NamedReference)) {
         for elem in &mut self.elems {
             let mut cell = elem.cell.borrow_mut();
             if let RowColExpr::Named(ref mut e) = cell.col_expr {
@@ -712,7 +716,7 @@ impl GridLayout {
         }
     }
 
-    pub fn visit_named_references(&mut self, visitor: &mut impl FnMut(&mut NamedReference)) {
+    pub fn visit_named_references(&mut self, visitor: &mut dyn FnMut(&mut NamedReference)) {
         self.visit_rowcol_named_references(visitor);
         for layout_elem in &mut self.elems {
             layout_elem.item.constraints.visit_named_references(visitor);
@@ -738,9 +742,15 @@ pub struct BoxLayout {
 }
 
 impl BoxLayout {
-    pub fn visit_named_references(&mut self, visitor: &mut impl FnMut(&mut NamedReference)) {
+    pub fn visit_named_references(&mut self, visitor: &mut dyn FnMut(&mut NamedReference)) {
         for cell in &mut self.elems {
             cell.constraints.visit_named_references(visitor);
+            if let Some(e) = cell.cross_axis_self_alignment.as_mut() {
+                visitor(&mut *e);
+            }
+            if let Some(e) = cell.layout_order.as_mut() {
+                visitor(&mut *e);
+            }
         }
         self.geometry.visit_named_references(visitor);
         if let Some(e) = self.cross_alignment.as_mut() {
@@ -752,7 +762,7 @@ impl BoxLayout {
 /// Internal representation of a FlexboxLayout (row or column direction with wrapping)
 #[derive(Debug, Clone)]
 pub struct FlexboxLayout {
-    pub elems: Vec<FlexboxLayoutItem>,
+    pub elems: Vec<LayoutItem>,
     pub geometry: LayoutGeometry,
     pub direction: Option<NamedReference>,
     pub cross_axis_line_alignment: Option<NamedReference>,
@@ -827,22 +837,13 @@ impl FlexboxLayout {
         }
     }
 
-    pub fn visit_named_references(&mut self, visitor: &mut impl FnMut(&mut NamedReference)) {
+    pub fn visit_named_references(&mut self, visitor: &mut dyn FnMut(&mut NamedReference)) {
         for cell in &mut self.elems {
-            cell.item.constraints.visit_named_references(visitor);
-            if let Some(e) = cell.flex_grow.as_mut() {
+            cell.constraints.visit_named_references(visitor);
+            if let Some(e) = cell.cross_axis_self_alignment.as_mut() {
                 visitor(&mut *e)
             }
-            if let Some(e) = cell.flex_shrink.as_mut() {
-                visitor(&mut *e)
-            }
-            if let Some(e) = cell.flex_basis.as_mut() {
-                visitor(&mut *e)
-            }
-            if let Some(e) = cell.align_self.as_mut() {
-                visitor(&mut *e)
-            }
-            if let Some(e) = cell.order.as_mut() {
+            if let Some(e) = cell.layout_order.as_mut() {
                 visitor(&mut *e)
             }
         }
@@ -860,6 +861,31 @@ impl FlexboxLayout {
             visitor(&mut *e)
         }
     }
+}
+
+/// Whether the builtin — or the native class it resolves to after the
+/// `resolve_native_classes` pass — has no intrinsic size (Rectangle, Empty,
+/// TouchArea, etc.): its layout info is the static default, never
+/// height-for-width.
+fn has_no_intrinsic_size(base: &ElementType) -> bool {
+    let name = match base {
+        ElementType::Builtin(b) => b.name.as_str(),
+        ElementType::Native(n) => n.class_name.as_str(),
+        _ => return false,
+    };
+    matches!(
+        name,
+        "Rectangle"
+            | "BasicBorderRectangle"
+            | "BorderRectangle"
+            | "Empty"
+            | "TouchArea"
+            | "FocusScope"
+            | "Opacity"
+            | "Layer"
+            | "BoxShadow"
+            | "Clip"
+    )
 }
 
 /// Controls whether `implicit_layout_info_call` returns layout info for builtins
@@ -925,18 +951,8 @@ pub fn implicit_layout_info_call(
                     }
                 }
             }
-            ElementType::Builtin(base_type)
-                if matches!(
-                    base_type.name.as_str(),
-                    "Rectangle"
-                        | "Empty"
-                        | "TouchArea"
-                        | "FocusScope"
-                        | "Opacity"
-                        | "Layer"
-                        | "BoxShadow"
-                        | "Clip"
-                ) =>
+            base @ (ElementType::Builtin(_) | ElementType::Native(_))
+                if has_no_intrinsic_size(base) =>
             {
                 if filter == BuiltinFilter::SkipNonImplicit {
                     return None;
@@ -995,22 +1011,14 @@ pub fn static_native_stretch(elem: &ElementRc) -> Option<Expression> {
 /// Create a new property based on the name. (it might get a different name if that property exist)
 pub fn create_new_prop(elem: &ElementRc, tentative_name: SmolStr, ty: Type) -> NamedReference {
     let mut e = elem.borrow_mut();
-    if !e.lookup_property(&tentative_name).is_valid() {
-        e.property_declarations.insert(tentative_name.clone(), ty.into());
-        drop(e);
-        NamedReference::new(elem, tentative_name)
+    let name = if e.lookup_property(&tentative_name, PropertyLookupMode::InternalName).is_valid() {
+        e.unique_member_name(&tentative_name)
     } else {
-        let mut counter = 0;
-        loop {
-            counter += 1;
-            let name = format_smolstr!("{}{}", tentative_name, counter);
-            if !e.lookup_property(&name).is_valid() {
-                e.property_declarations.insert(name.clone(), ty.into());
-                drop(e);
-                return NamedReference::new(elem, name);
-            }
-        }
-    }
+        tentative_name
+    };
+    e.property_declarations.insert(name.clone(), ty.into());
+    drop(e);
+    NamedReference::new(elem, name)
 }
 
 /// Return true if this type is a layout that has constraints

@@ -11,13 +11,13 @@ use crate::expression_tree::{
     BuiltinFunction, BuiltinMacroFunction, Callable, EasingCurve, Expression, MouseCursorInner,
     Unit,
 };
-use crate::langtype::{ElementType, Enumeration, EnumerationValue, Type};
+use crate::langtype::{ElementType, Enumeration, EnumerationValue, PropertyLookupMode, Type};
 use crate::namedreference::NamedReference;
 use crate::object_tree::{ElementRc, PropertyVisibility};
-use crate::parser::NodeOrToken;
+use crate::parser::{NodeOrToken, TextRange, TextSize};
 use crate::symbol_counters::SymbolCounters;
 use crate::typeregister::TypeRegister;
-use smol_str::{SmolStr, ToSmolStr, format_smolstr};
+use smol_str::{SmolStr, format_smolstr};
 use std::cell::RefCell;
 
 pub use i_slint_common::color_parsing::named_colors;
@@ -61,6 +61,10 @@ pub struct LookupCtx<'a> {
 
     /// A stack of local variable scopes
     pub local_variables: Vec<Vec<(SmolStr, Type)>>,
+
+    /// LSP probe: while resolving, the `Type` is set to the `expected_type` at the innermost
+    /// node containing the offset. `None` during normal compilation.
+    pub expected_type_probe: Option<(TextSize, Type)>,
 }
 
 impl<'a> LookupCtx<'a> {
@@ -82,6 +86,7 @@ impl<'a> LookupCtx<'a> {
             type_loader: None,
             current_token: None,
             local_variables: Default::default(),
+            expected_type_probe: None,
         }
     }
 
@@ -89,6 +94,37 @@ impl<'a> LookupCtx<'a> {
         match &self.property_type {
             Type::Callback(f) | Type::Function(f) => &f.return_type,
             _ => &self.property_type,
+        }
+    }
+
+    /// Whether lookup offers experimental entries: enabled experimental features,
+    /// or the builtin widget library, which may use them.
+    fn experimental_lookup_enabled(&self) -> bool {
+        self.diag.enable_experimental || self.type_register.expose_internal_types
+    }
+
+    /// Arm the LSP probe at `offset`, seeded with the current `expected_type` as fallback.
+    pub fn set_expected_type_probe(&mut self, offset: TextSize) {
+        self.expected_type_probe = Some((offset, self.expected_type.clone()));
+    }
+
+    /// The armed probe's offset, or `None` during normal compilation.
+    pub fn expected_type_probe_offset(&self) -> Option<TextSize> {
+        self.expected_type_probe.as_ref().map(|(offset, _)| *offset)
+    }
+
+    /// Disarm the probe and return the type recorded at its offset.
+    pub fn take_expected_type_probe(&mut self) -> Option<Type> {
+        self.expected_type_probe.take().map(|(_, ty)| ty)
+    }
+
+    /// Record `ty` on the probe when its offset is in `range` — for a slot with no expression
+    /// node (the empty element/argument left by a trailing comma).
+    pub fn record_expected_type_probe(&mut self, range: TextRange, ty: &Type) {
+        if let Some((offset, slot)) = &mut self.expected_type_probe
+            && range.contains_inclusive(*offset)
+        {
+            *slot = ty.clone();
         }
     }
 
@@ -441,13 +477,13 @@ impl LookupObject for InScopeLookup {
             |str, r| f.borrow_mut()(str, r),
             |elem| elem.for_each_entry(ctx, *f.borrow_mut()),
             |elem| {
-                for (name, prop) in &elem.borrow().property_declarations {
+                for (internal_name, prop) in &elem.borrow().property_declarations {
                     let e = expression_from_reference(
-                        NamedReference::new(elem, name.clone()),
+                        NamedReference::new(elem, internal_name.clone()),
                         &prop.property_type,
                         None,
                     );
-                    if let Some(r) = f.borrow_mut()(name, e) {
+                    if let Some(r) = f.borrow_mut()(prop.declared_name(internal_name), e) {
                         return Some(r);
                     }
                 }
@@ -465,9 +501,10 @@ impl LookupObject for InScopeLookup {
             |str, r| (str == name).then_some(r),
             |elem| elem.lookup(ctx, name),
             |elem| {
-                elem.borrow().property_declarations.get(name).map(|prop| {
+                let elem_borrow = elem.borrow();
+                elem_borrow.declaration(name).map(|(internal_name, prop)| {
                     expression_from_reference(
-                        NamedReference::new(elem, name.clone()),
+                        NamedReference::new(elem, internal_name.clone()),
                         &prop.property_type,
                         None,
                     )
@@ -483,9 +520,10 @@ impl LookupObject for ElementRc {
         ctx: &LookupCtx,
         f: &mut impl FnMut(&SmolStr, LookupResult) -> Option<R>,
     ) -> Option<R> {
-        for (name, prop) in &self.borrow().property_declarations {
+        for (internal_name, prop) in &self.borrow().property_declarations {
+            let name = prop.declared_name(internal_name);
             let r = expression_from_reference(
-                NamedReference::new(self, name.clone()),
+                NamedReference::new(self, internal_name.clone()),
                 &prop.property_type,
                 check_extra_deprecated(self, ctx, name),
             );
@@ -493,9 +531,20 @@ impl LookupObject for ElementRc {
                 return Some(r);
             }
         }
+        // NamedReference::new borrows the element, so the check can't hold a borrow across the loop
+        let has_shadows = !self.borrow().shadowing_members.is_empty();
         let list = self.borrow().base_type.property_list();
         for (name, ty) in list {
-            let e = expression_from_reference(NamedReference::new(self, name.clone()), &ty, None);
+            // A shadowing declaration above already offered this name
+            if has_shadows && self.borrow().shadowing_members.contains_key(&name) {
+                continue;
+            }
+            // Resolve the source name to the storage key so a shadow in a base resolves correctly.
+            let key = self
+                .borrow()
+                .lookup_property(&name, PropertyLookupMode::ComponentLocal)
+                .internal_or_resolved_name();
+            let e = expression_from_reference(NamedReference::new(self, key), &ty, None);
             if let Some(r) = f(&name, e) {
                 return Some(r);
             }
@@ -523,7 +572,7 @@ impl LookupObject for ElementRc {
     }
 
     fn lookup(&self, ctx: &LookupCtx, name: &SmolStr) -> Option<LookupResult> {
-        let lookup_result = self.borrow().lookup_property(name);
+        let lookup_result = self.borrow().lookup_property(name, PropertyLookupMode::ComponentLocal);
         if lookup_result.property_type != Type::Invalid
             && (lookup_result.is_local_to_component
                 || lookup_result.property_visibility != PropertyVisibility::Private)
@@ -540,7 +589,7 @@ impl LookupObject for ElementRc {
                 })
                 .or_else(|| check_extra_deprecated(self, ctx, name));
             Some(expression_from_reference(
-                NamedReference::new(self, lookup_result.resolved_name.to_smolstr()),
+                NamedReference::new(self, lookup_result.internal_or_resolved_name()),
                 &lookup_result.property_type,
                 deprecated,
             ))
@@ -666,22 +715,22 @@ impl LookupObject for TypeSpecificLookup {
         ctx: &LookupCtx,
         f: &mut impl FnMut(&SmolStr, LookupResult) -> Option<R>,
     ) -> Option<R> {
+        let sc = ctx.diag.is_slint_sc();
         match &ctx.expected_type {
-            Type::Color => ColorSpecific.for_each_entry(ctx, f),
-            Type::Brush => ColorSpecific.for_each_entry(ctx, f),
-            Type::Easing => EasingSpecific.for_each_entry(ctx, f),
-            Type::MouseCursor => MouseCursorSpecific.for_each_entry(ctx, f),
+            Type::Color | Type::Brush if !sc => ColorSpecific.for_each_entry(ctx, f),
+            Type::Easing if !sc => EasingSpecific.for_each_entry(ctx, f),
+            Type::MouseCursor if !sc => MouseCursorSpecific.for_each_entry(ctx, f),
             Type::Enumeration(enumeration) => enumeration.clone().for_each_entry(ctx, f),
             _ => None,
         }
     }
 
     fn lookup(&self, ctx: &LookupCtx, name: &SmolStr) -> Option<LookupResult> {
+        let sc = ctx.diag.is_slint_sc();
         match &ctx.expected_type {
-            Type::Color => ColorSpecific.lookup(ctx, name),
-            Type::Brush => ColorSpecific.lookup(ctx, name),
-            Type::Easing => EasingSpecific.lookup(ctx, name),
-            Type::MouseCursor => MouseCursorSpecific.lookup(ctx, name),
+            Type::Color | Type::Brush if !sc => ColorSpecific.lookup(ctx, name),
+            Type::Easing if !sc => EasingSpecific.lookup(ctx, name),
+            Type::MouseCursor if !sc => MouseCursorSpecific.lookup(ctx, name),
             Type::Enumeration(enumeration) => enumeration.clone().lookup(ctx, name),
             _ => None,
         }
@@ -714,6 +763,31 @@ impl ColorSpecific {
         }
         .into()
     }
+}
+
+/// Given a bare identifier `name` that failed to resolve, return the qualified forms that would
+/// resolve it as an enum value or a named color, e.g. `["Colors.red"]` or
+/// `["LayoutAlignment.center", "TextHorizontalAlignment.center"]`. This is the reverse of the
+/// `ColorSpecific` / enum lookups above, used to build "did you mean" suggestions. The result is
+/// sorted and deduplicated so it is deterministic.
+pub fn enum_or_color_suggestions(ctx: &LookupCtx, name: &str) -> Vec<SmolStr> {
+    let name = crate::parser::normalize_identifier(name);
+    let mut result = Vec::new();
+    if named_colors().contains_key(name.as_str())
+        && BuiltinNamespaceLookup.lookup(ctx, &SmolStr::new_static("Colors")).is_some()
+    {
+        result.push(smol_str::format_smolstr!("{}.{name}", BuiltinNamespace::Colors));
+    }
+    for ty in ctx.type_register.all_types().values() {
+        if let Type::Enumeration(e) = ty
+            && e.lookup(ctx, &name).is_some()
+        {
+            result.push(smol_str::format_smolstr!("{}.{name}", e.name));
+        }
+    }
+    result.sort();
+    result.dedup();
+    result
 }
 
 pub struct KeysLookup;
@@ -783,6 +857,7 @@ impl LookupObject for EasingSpecific {
         r.or_else(|| {
             f(&SmolStr::new_static("cubic-bezier"), BuiltinMacroFunction::CubicBezier.into())
         })
+        .or_else(|| f(&SmolStr::new_static("spring"), BuiltinMacroFunction::Spring.into()))
     }
 }
 
@@ -810,10 +885,21 @@ impl LookupObject for FontWeightLookup {
 impl LookupObject for Arc<Enumeration> {
     fn for_each_entry<R>(
         &self,
-        _ctx: &LookupCtx,
+        ctx: &LookupCtx,
         f: &mut impl FnMut(&SmolStr, LookupResult) -> Option<R>,
     ) -> Option<R> {
+        // Builtin enums are not in the Slint SC subset.
+        if ctx.diag.is_slint_sc() && self.node.is_none() {
+            return None;
+        }
         for (value, name) in self.values.iter().enumerate() {
+            // Don't offer `auto` in completion for `cross-axis-alignment`, where setting it is an error; `lookup` stays unfiltered.
+            if name == "auto"
+                && Arc::ptr_eq(self, &crate::typeregister::BUILTIN.enums.CrossAxisAlignment)
+                && ctx.property_name == Some("cross-axis-alignment")
+            {
+                continue;
+            }
             if let Some(r) = f(
                 name,
                 Expression::EnumerationValue(EnumerationValue { value, enumeration: self.clone() })
@@ -823,6 +909,18 @@ impl LookupObject for Arc<Enumeration> {
             }
         }
         None
+    }
+
+    fn lookup(&self, ctx: &LookupCtx, name: &SmolStr) -> Option<LookupResult> {
+        // Builtin enums are not in the Slint SC subset.
+        if ctx.diag.is_slint_sc() && self.node.is_none() {
+            return None;
+        }
+        let value = self.values.iter().position(|v| v == name)?;
+        Some(
+            Expression::EnumerationValue(EnumerationValue { value, enumeration: self.clone() })
+                .into(),
+        )
     }
 }
 
@@ -863,7 +961,7 @@ struct MouseCursorSpecific;
 impl LookupObject for MouseCursorSpecific {
     fn for_each_entry<R>(
         &self,
-        _ctx: &LookupCtx,
+        ctx: &LookupCtx,
         f: &mut impl FnMut(&SmolStr, LookupResult) -> Option<R>,
     ) -> Option<R> {
         let e = crate::typeregister::BUILTIN.enums.BuiltInMouseCursor.clone();
@@ -875,6 +973,10 @@ impl LookupObject for MouseCursorSpecific {
             }
         }
         r.or_else(|| {
+            // Experimental until the language has enums with data.
+            if !ctx.experimental_lookup_enabled() {
+                return None;
+            }
             f(&SmolStr::new_static("custom"), BuiltinMacroFunction::CustomMouseCursor.into())
         })
     }
@@ -963,6 +1065,9 @@ impl LookupObject for BuiltinFunctionLookup {
         ctx: &LookupCtx,
         f: &mut impl FnMut(&SmolStr, LookupResult) -> Option<R>,
     ) -> Option<R> {
+        if ctx.diag.is_slint_sc() {
+            return None;
+        }
         (MathFunctions, ColorFunctions)
             .for_each_entry(ctx, f)
             .or_else(|| f(&SmolStr::new_static("debug"), BuiltinMacroFunction::Debug.into()))
@@ -979,6 +1084,9 @@ impl LookupObject for BuiltinNamespaceLookup {
         ctx: &LookupCtx,
         f: &mut impl FnMut(&SmolStr, LookupResult) -> Option<R>,
     ) -> Option<R> {
+        if ctx.diag.is_slint_sc() {
+            return None;
+        }
         let mut f = |s, res| f(&SmolStr::new_static(s), res);
         None.or_else(|| f("Colors", LookupResult::Namespace(BuiltinNamespace::Colors)))
             .or_else(|| f("Easing", LookupResult::Namespace(BuiltinNamespace::Easing)))
@@ -1042,9 +1150,11 @@ impl LookupObject for Expression {
                     }
                     None
                 }
+                Type::Image => ImageExpression(self).for_each_entry(ctx, f),
+                // Only struct fields and image dimensions are members in Slint SC.
+                _ if ctx.diag.is_slint_sc() => None,
                 Type::String => StringExpression(self).for_each_entry(ctx, f),
                 Type::Brush | Type::Color => ColorExpression(self).for_each_entry(ctx, f),
-                Type::Image => ImageExpression(self).for_each_entry(ctx, f),
                 Type::Array(_) => ArrayExpression(self).for_each_entry(ctx, f),
                 Type::Float32 | Type::Int32 | Type::Percent => {
                     NumberExpression(self).for_each_entry(ctx, f)
@@ -1068,9 +1178,11 @@ impl LookupObject for Expression {
                         name: name.clone(),
                     })
                 }),
+                Type::Image => ImageExpression(self).lookup(ctx, name),
+                // Only struct fields and image dimensions are members in Slint SC.
+                _ if ctx.diag.is_slint_sc() => None,
                 Type::String => StringExpression(self).lookup(ctx, name),
                 Type::Brush | Type::Color => ColorExpression(self).lookup(ctx, name),
-                Type::Image => ImageExpression(self).lookup(ctx, name),
                 Type::Array(_) => ArrayExpression(self).lookup(ctx, name),
                 Type::Float32 | Type::Int32 | Type::Percent => {
                     NumberExpression(self).lookup(ctx, name)
@@ -1110,6 +1222,7 @@ impl LookupObject for StringExpression<'_> {
             .or_else(|| f("to-uppercase", member_function(BuiltinFunction::StringToUppercase)))
             .or_else(|| f("starts-with", member_function(BuiltinFunction::StringStartsWith)))
             .or_else(|| f("ends-with", member_function(BuiltinFunction::StringEndsWith)))
+            .or_else(|| f("replace-all", member_function(BuiltinFunction::StringReplaceAll)))
     }
 }
 
@@ -1218,12 +1331,14 @@ impl LookupObject for ArrayExpression<'_> {
             .or_else(|| f("remove", member_macro(BuiltinMacroFunction::ArrayRemove)))
             .or_else(|| f("insert", member_macro(BuiltinMacroFunction::ArrayInsert)))
             .or_else(|| {
-                // `any` and `all` take a closure argument; closures are experimental.
-                if !ctx.diag.enable_experimental && !ctx.type_register.expose_internal_types {
+                // Experimental: pending optional types for the -1 result, and closures.
+                if !ctx.experimental_lookup_enabled() {
                     return None;
                 }
-                f("any", member_function(BuiltinFunction::ArrayAny))
+                f("index-of", member_macro(BuiltinMacroFunction::ArrayIndexOf))
+                    .or_else(|| f("any", member_function(BuiltinFunction::ArrayAny)))
                     .or_else(|| f("all", member_function(BuiltinFunction::ArrayAll)))
+                    .or_else(|| f("find-index", member_function(BuiltinFunction::ArrayFindIndex)))
             })
     }
 }

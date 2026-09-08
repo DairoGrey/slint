@@ -11,9 +11,9 @@ use crate::api::{
 };
 use crate::cursor::MouseCursorInner;
 use crate::input::{
-    ClickState, DragData, FocusEvent, FocusReason, InternalKeyEvent, KeyEventResult, KeyEventType,
-    Keys, MouseEvent, MouseInputState, PointerEventButton, TextCursorBlinker, TouchPhase,
-    TouchState, key_codes,
+    BackendDragEvent, ClickState, DragData, FocusEvent, FocusReason, InternalKeyEvent,
+    KeyEventResult, KeyEventType, Keys, MouseEvent, MouseInputState, PointerEventButton,
+    TextCursorBlinker, TouchPhase, TouchState, key_codes,
 };
 use crate::item_tree::{
     ItemRc, ItemTreeRc, ItemTreeRef, ItemTreeRefPin, ItemTreeVTable, ItemTreeWeak, ItemWeak,
@@ -467,11 +467,15 @@ struct WindowPropertiesTracker {
 impl crate::properties::PropertyDirtyHandler for WindowPropertiesTracker {
     fn notify(self: Pin<&Self>) {
         let win = self.window_adapter_weak.clone();
-        crate::timers::Timer::single_shot(Default::default(), move || {
-            if let Some(window_adapter) = win.upgrade() {
-                WindowInner::from_pub(window_adapter.window()).update_window_properties();
-            };
-        })
+        let Some(adapter) = win.upgrade() else { return };
+        WindowInner::from_pub(adapter.window()).context().single_shot(
+            Default::default(),
+            move || {
+                if let Some(window_adapter) = win.upgrade() {
+                    WindowInner::from_pub(window_adapter.window()).update_window_properties();
+                };
+            },
+        )
     }
 }
 
@@ -486,13 +490,18 @@ impl crate::properties::PropertyDirtyHandler for PopupWindowPropertiesTracker {
     fn notify(self: Pin<&Self>) {
         let parent = self.parent_window_adapter_weak.clone();
         let popup_id = self.popup_id;
+        let Some(parent_adapter) = parent.upgrade() else { return };
         // Use a timer here, so if we change multiple properties at the same time not multiple notifications are send
         // This timer will delay for the next evaluation
-        crate::timers::Timer::single_shot(Default::default(), move || {
-            if let Some(parent_adapter) = parent.upgrade() {
-                WindowInner::from_pub(parent_adapter.window()).update_popup_properties(popup_id);
-            }
-        });
+        WindowInner::from_pub(parent_adapter.window()).context().single_shot(
+            Default::default(),
+            move || {
+                if let Some(parent_adapter) = parent.upgrade() {
+                    WindowInner::from_pub(parent_adapter.window())
+                        .update_popup_properties(popup_id);
+                }
+            },
+        );
     }
 }
 
@@ -576,7 +585,7 @@ struct WindowPinnedFields {
 
 /// The outcome of dispatching a [`MouseEvent`] through [`WindowInner::process_mouse_input`].
 #[derive(Copy, Clone, Debug)]
-pub struct MouseDispatchResult {
+pub(crate) struct MouseDispatchResult {
     /// For `MouseEvent::DragMove` / `MouseEvent::Drop` events, the action negotiated with
     /// the accepting `DropArea` (or `None` if no `DropArea` accepted). Always `None` for
     /// other event kinds.
@@ -602,6 +611,7 @@ pub struct WindowInner {
     /// ItemRC that currently have the focus (possibly an instance of TextInput)
     pub focus_item: RefCell<crate::item_tree::ItemWeak>,
     focus_item_visibility_tracker: ChangeTracker,
+    focus_item_position_tracker: ChangeTracker,
     /// The last text that was sent to the input method
     pub(crate) last_ime_text: RefCell<SharedString>,
     /// Don't let ComponentContainers's instantiation change the focus.
@@ -681,6 +691,7 @@ impl WindowInner {
             }),
             focus_item: Default::default(),
             focus_item_visibility_tracker: Default::default(),
+            focus_item_position_tracker: Default::default(),
             last_ime_text: Default::default(),
             cursor_blinker: Default::default(),
             active_popups: Default::default(),
@@ -700,6 +711,7 @@ impl WindowInner {
     pub fn set_component(&self, component: &ItemTreeRc) {
         self.close_all_popups();
         self.focus_item_visibility_tracker.clear();
+        self.focus_item_position_tracker.clear();
         self.focus_item.replace(Default::default());
         self.mouse_input_state.replace(Default::default());
         self.touch_state.replace(Default::default());
@@ -716,7 +728,7 @@ impl WindowInner {
         self.set_window_item_safe_area(inset.to_logical(scale_factor));
         window_adapter.request_redraw();
         let weak = Rc::downgrade(&window_adapter);
-        crate::timers::Timer::single_shot(Default::default(), move || {
+        self.context().single_shot(Default::default(), move || {
             if let Some(window_adapter) = weak.upgrade() {
                 WindowInner::from_pub(window_adapter.window()).update_window_properties();
             }
@@ -766,6 +778,11 @@ impl WindowInner {
     /// Receive a mouse event and pass it to the items of the component to
     /// change their state.
     ///
+    /// This is the runtime's entry point for pointer input.
+    /// Backends don't call it directly, they dispatch [`crate::platform::InternalEvent::Mouse`]
+    /// through [`crate::api::Window::dispatch_event_with_result()`],
+    /// so that every event they deliver takes the same path and is observed by the window event hook.
+    ///
     /// Returns `None` when there is no component to dispatch to; otherwise returns a
     /// [`MouseDispatchResult`] carrying:
     /// - `accepted`: whether an item consumed the event, and
@@ -776,8 +793,8 @@ impl WindowInner {
     /// `Drop` (if a `DropArea` had previously accepted the matching `DragMove`) or an
     /// `Exit` (if not). The reported `accepted` reflects the rewritten event, so a
     /// `Released` that completes a drop on a non-accepting target reports `accepted = false`.
-    pub fn process_mouse_input(&self, mut event: MouseEvent) -> Option<MouseDispatchResult> {
-        crate::animations::update_animations();
+    pub(crate) fn process_mouse_input(&self, mut event: MouseEvent) -> Option<MouseDispatchResult> {
+        crate::animations::update_animations(crate::animations::Instant::now(self.context()));
 
         let item_tree = self.try_component()?;
         self.ensure_tree_instantiated();
@@ -791,7 +808,7 @@ impl WindowInner {
         }
 
         // handle multiple press release
-        event = self.click_state.check_repeat(event, self.context().platform().click_interval());
+        event = self.click_state.check_repeat(event, self.context());
 
         let window_adapter = self.window_adapter();
         let mut mouse_input_state = self.mouse_input_state.take();
@@ -1029,7 +1046,7 @@ impl WindowInner {
 
         if last_top_item != mouse_input_state.top_item_including_delayed() {
             self.click_state.reset();
-            self.click_state.check_repeat(event, self.context().platform().click_interval());
+            self.click_state.check_repeat(event, self.context());
         }
 
         if !had_delay && mouse_input_state.has_delayed_event() {
@@ -1100,6 +1117,19 @@ impl WindowInner {
         Some(MouseDispatchResult { drag_action, accepted })
     }
 
+    /// Dispatch a drag and drop event.
+    /// Returns the action negotiated with the accepting `DropArea`, or `None` when none accepted.
+    ///
+    /// Drag and drop is the one kind of input that backends don't deliver through
+    /// [`crate::api::Window::dispatch_event_with_result()`]:
+    /// they need the negotiated action back, which [`crate::platform::WindowEventDispatchResult`] can't express,
+    /// and a drag leaving the window isn't the pointer leaving the window.
+    /// [`BackendDragEvent`] keeps this entry point to drag and drop,
+    /// so that nothing else bypasses the window event hook.
+    pub fn process_drag_event(&self, event: BackendDragEvent) -> Option<crate::items::DragAction> {
+        self.process_mouse_input(event.into()).and_then(|result| result.drag_action)
+    }
+
     /// Remember (or clear) the in-flight native drag, so a backend can report completion or fall
     /// back, and a drop back onto this window can restore the data. Set by `offer_native_drag`.
     pub(crate) fn set_native_drag(&self, drag: Option<NativePendingDrag>) {
@@ -1164,7 +1194,7 @@ impl WindowInner {
     /// `drag_action` reflects the current drop-target negotiation, not a per-event
     /// verdict to aggregate. For touch sequences that never produce a `DragMove`/`Drop`
     /// (the common case), this stays `None` throughout.
-    pub fn process_touch_input(
+    pub(crate) fn process_touch_input(
         &self,
         id: i32,
         position: LogicalPoint,
@@ -1196,7 +1226,7 @@ impl WindowInner {
     ///
     /// Arguments:
     /// * `event`: The key event received by the windowing system.
-    pub fn process_key_input(
+    pub(crate) fn process_key_input(
         &self,
         mut internal_key_event: InternalKeyEvent,
     ) -> crate::input::KeyEventResult {
@@ -1393,11 +1423,8 @@ impl WindowInner {
             new_blinker
         });
 
-        TextCursorBlinker::set_binding(
-            blinker,
-            prop,
-            self.context().platform().cursor_flash_cycle(),
-        );
+        let ctx = self.context();
+        TextCursorBlinker::set_binding(blinker, prop, ctx, ctx.platform().cursor_flash_cycle());
     }
 
     /// Sets the focus to the item pointed to by item_ptr. This will remove the focus from any
@@ -1447,6 +1474,7 @@ impl WindowInner {
     /// This sends the event which must be either FocusOut or WindowLostFocus for popups
     fn take_focus_item(&self, event: &FocusEvent) -> Option<ItemRc> {
         self.focus_item_visibility_tracker.clear();
+        self.focus_item_position_tracker.clear();
         let focus_item = self.focus_item.take();
         assert!(matches!(event, FocusEvent::FocusOut(_)));
 
@@ -1473,7 +1501,6 @@ impl WindowInner {
         match item {
             Some(item) => {
                 *self.focus_item.borrow_mut() = item.downgrade();
-                self.track_focus_item_visibility(item);
                 let result = item.borrow().as_ref().focus_event(
                     &FocusEvent::FocusIn(reason),
                     &self.window_adapter(),
@@ -1481,6 +1508,7 @@ impl WindowInner {
                 );
                 // Reveal offscreen item when it gains focus
                 if result == crate::input::FocusEventResult::FocusAccepted {
+                    self.track_focus_item(item);
                     item.try_scroll_into_visible();
                 }
 
@@ -1488,13 +1516,15 @@ impl WindowInner {
             }
             None => {
                 self.focus_item_visibility_tracker.clear();
+                self.focus_item_position_tracker.clear();
                 *self.focus_item.borrow_mut() = Default::default();
                 crate::input::FocusEventResult::FocusAccepted // We were removing the focus, treat that as OK
             }
         }
     }
 
-    fn track_focus_item_visibility(&self, item: &ItemRc) {
+    fn track_focus_item(&self, item: &ItemRc) {
+        // Track visibility
         let visibility_clips = item.visibility_clips();
         self.focus_item_visibility_tracker.init(
             (item.downgrade(), self.window_adapter_weak.clone(), visibility_clips),
@@ -1516,6 +1546,27 @@ impl WindowInner {
                 );
             },
         );
+
+        // Track position
+        if item.downcast::<crate::items::TextInput>().is_some() {
+            self.focus_item_position_tracker.init(
+                (item.downgrade(), self.window_adapter_weak.clone()),
+                |(item, _)| {
+                    let Some(item) = item.upgrade() else { return Default::default() };
+                    Some(item.map_to_native_window(item.geometry().origin))
+                },
+                |(item, window_adapter), _| {
+                    let (Some(item), Some(window_adapter)) =
+                        (item.upgrade(), window_adapter.upgrade())
+                    else {
+                        return;
+                    };
+                    if let Some(text_input) = item.downcast::<crate::items::TextInput>() {
+                        text_input.as_pin_ref().update_ime(&window_adapter, &item);
+                    }
+                },
+            );
+        }
     }
 
     fn move_focus(
@@ -1524,8 +1575,13 @@ impl WindowInner {
         forward: impl Fn(ItemRc) -> ItemRc,
         reason: FocusReason,
     ) -> Option<ItemRc> {
-        let mut current_item = start_item;
-        let mut visited = Vec::new();
+        let mut current_item = start_item.clone();
+        // The walk normally comes back to `start_item`, but ends in a cycle that misses it
+        // when the tree changed under it, e.g. when the focus was on a removed item.
+        // Comparing against a checkpoint (Brent's cycle detection) still terminates then.
+        let mut checkpoint = start_item.clone();
+        let mut steps = 0usize;
+        let mut next_checkpoint = 1usize;
 
         loop {
             let can_receive_focus = match reason {
@@ -1539,11 +1595,16 @@ impl WindowInner {
             {
                 return Some(current_item); // Item was just published.
             }
-            visited.push(current_item.clone());
             current_item = forward(current_item);
 
-            if visited.contains(&current_item) {
+            if current_item == start_item || current_item == checkpoint {
                 return None; // Nothing to do: We took the focus_item already
+            }
+            steps += 1;
+            if steps == next_checkpoint {
+                checkpoint = current_item.clone();
+                steps = 0;
+                next_checkpoint *= 2;
             }
         }
     }
@@ -1678,7 +1739,10 @@ impl WindowInner {
                             let layout_info_h = component
                                 .as_ref()
                                 .layout_info(crate::layout::Orientation::Horizontal);
-                            let w = layout_info_h.min.min(layout_info_h.max);
+                            let w = layout_info_h
+                                .preferred
+                                .max(layout_info_h.min)
+                                .min(layout_info_h.max);
                             window_item.width.set(LogicalLength::new(w));
                             w
                         };
@@ -1687,7 +1751,10 @@ impl WindowInner {
                             let layout_info_v = component
                                 .as_ref()
                                 .layout_info(crate::layout::Orientation::Vertical);
-                            let h = layout_info_v.min.min(layout_info_v.max);
+                            let h = layout_info_v
+                                .preferred
+                                .max(layout_info_v.min)
+                                .min(layout_info_v.max);
                             window_item.height.set(LogicalLength::new(h));
                             h
                         };
@@ -1758,6 +1825,10 @@ impl WindowInner {
         ) -> T,
     ) -> Option<T> {
         crate::properties::evaluate_no_tracking(|| self.ensure_tree_instantiated());
+        #[cfg(feature = "shared-parley")]
+        if let Some(cache) = self.window_adapter().renderer().text_layout_cache() {
+            cache.begin_frame();
+        }
         let component_weak = ItemTreeRc::downgrade(&self.try_component()?);
         let post_render = |renderer: &mut dyn crate::item_rendering::ItemRenderer| {
             self.render_drag_image_overlay(renderer);
@@ -2449,10 +2520,13 @@ pub mod ffi {
     #![allow(missing_docs)]
 
     use super::*;
+    #[cfg(feature = "std")]
     use crate::SharedVector;
     use crate::api::{RenderingNotifier, RenderingState, SetRenderingNotifierError};
+    use crate::graphics::IntSize;
+    #[cfg(feature = "std")]
+    use crate::graphics::Rgba8Pixel;
     use crate::graphics::Size;
-    use crate::graphics::{IntSize, Rgba8Pixel};
     use crate::items::WindowItem;
     use core::ffi::c_void;
 
@@ -2962,15 +3036,17 @@ pub mod ffi {
     ) {
         unsafe {
             let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
-            window_adapter.window().0.process_key_input(InternalKeyEvent {
-                event_type,
-                key_event: crate::items::KeyEvent {
-                    text: text.clone(),
-                    repeat,
+            window_adapter.window().dispatch_event(crate::platform::WindowEvent::internal(
+                InternalKeyEvent {
+                    event_type,
+                    key_event: crate::items::KeyEvent {
+                        text: text.clone(),
+                        repeat,
+                        ..Default::default()
+                    },
                     ..Default::default()
                 },
-                ..Default::default()
-            });
+            ));
         }
     }
 
@@ -2978,11 +3054,11 @@ pub mod ffi {
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_dispatch_pointer_event(
         handle: *const WindowAdapterRcOpaque,
-        event: &crate::input::MouseEvent,
+        event: &crate::input::BackendMouseEvent,
     ) {
         unsafe {
             let window_adapter = &*(handle as *const Rc<dyn WindowAdapter>);
-            window_adapter.window().0.process_mouse_input(event.clone());
+            window_adapter.window().dispatch_event(crate::platform::WindowEvent::internal(*event));
         }
     }
 
@@ -3062,6 +3138,7 @@ pub mod ffi {
     }
 
     /// Takes a snapshot of the window contents and returns it as RGBA8 encoded pixel buffer.
+    #[cfg(feature = "std")]
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn slint_windowrc_take_snapshot(
         handle: *const WindowAdapterRcOpaque,

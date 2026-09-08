@@ -1,11 +1,66 @@
 # Copyright © SixtyFPS GmbH <info@slint.dev>
 # SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
+# cSpell: ignore capfd
+
 import typing
 from pathlib import Path
 
+import pytest
+
 from slint import models
 from slint import slint as native
+
+
+def test_row_modification_rejection_raises() -> None:
+    model = models.ListModel([1, 2, 3])
+    with pytest.raises(IndexError):
+        model.remove_row(3)
+    with pytest.raises(IndexError):
+        model.insert_row(5, 4)
+
+    class ReadOnly(models.Model[int]):
+        def row_count(self) -> int:
+            return 1
+
+        def row_data(self, row: int) -> int | None:
+            return 42
+
+    with pytest.raises(NotImplementedError):
+        ReadOnly().push_row(1)
+
+
+def test_rejected_modification_logs_python_class_name(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    compiler = native.Compiler()
+    compdef = compiler.build_from_source(
+        """
+        export component App {
+            in-out property<[int]> ints;
+            public function push-one() { ints.push(4) }
+        }
+        """,
+        Path(""),
+    ).component("App")
+    assert compdef is not None
+    instance = compdef.create()
+    assert instance is not None
+
+    class ReadOnly(models.Model[int]):
+        def row_count(self) -> int:
+            return 1
+
+        def row_data(self, row: int) -> int | None:
+            return 42
+
+    instance.set_property("ints", ReadOnly())
+    instance.invoke("push_one")
+
+    err = capfd.readouterr().err
+    assert (
+        "array.push(): the model ReadOnly does not support this modification" in err
+    ), err
 
 
 def test_model_notify() -> None:
@@ -48,7 +103,7 @@ def test_model_notify() -> None:
     assert instance.get_property("layout-height") == 100
     model.set_row_data(1, 50)
     assert instance.get_property("layout-height") == 150
-    model.append(75)
+    model.push_row(75)
     instance._process_pending_events()
     assert instance.get_property("layout-height") == 225
     del model[1:]
@@ -290,3 +345,9 @@ def test_model_modifications() -> None:
     assert len(model) == 0
     instance.invoke("insert_one_empty")
     assert len(model) == 0
+
+
+def test_list_model_append_alias() -> None:
+    model = models.ListModel([1, 2])
+    model.append(3)
+    assert list(model) == [1, 2, 3]

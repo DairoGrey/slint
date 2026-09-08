@@ -14,6 +14,7 @@ alsa
 amdgpu
 amet
 Amoled
+analogclock
 androideabi
 anyrender
 Appbar
@@ -27,12 +28,14 @@ ARCHS
 armeabi
 armhf
 arrayvec
+artboard
 assetcatalog
 astrolib
 astrowind
 asyncio
 auri
 Aurindam
+autorelease
 autoremove
 AUTOSAR
 ayoxxx
@@ -55,9 +58,11 @@ blogicb
 boing
 boolprop
 bootsel
+boxlayout
 briefcasex
 brushprop
 brushval
+bugtracker
 buildcode
 builtinfunctions
 bytemuck
@@ -67,6 +72,7 @@ casesensitive
 CDPATH
 cfgs
 CFLAGS
+chacha
 charmap
 checkboxtile
 checkmark
@@ -74,6 +80,7 @@ checkstate
 chipset
 chrono
 Cinstrument
+ciphertext
 circledraw
 circularprogressindicator
 CLIB
@@ -113,6 +120,7 @@ cpos
 cppbuild
 cppdocs
 cppreference
+CSPRNG
 cstyle
 Csvg
 ctest
@@ -213,6 +221,7 @@ filterchip
 Fira
 FLASHMODE
 FLASHSIZE
+flathub
 Flexbox
 flexboxes
 Flickables
@@ -263,6 +272,8 @@ hidpi
 highp
 HINSTANCE
 Hira
+hkdf
+hmac
 hlayout
 hmenu
 horizontalbox
@@ -288,6 +299,7 @@ impls
 incididunt
 Inconsolata
 incpath
+indexmap
 inputchip
 intprop
 intval
@@ -304,6 +316,7 @@ ivars
 Jemalloc
 jemallocator
 kateversion
+Kconfig
 KDAB
 keepalive
 keepends
@@ -327,6 +340,7 @@ libavdevice
 libavfilter
 libavformat
 libavutil
+LIBC
 LIBCLANG
 libdrm
 libegl
@@ -398,6 +412,7 @@ mipidsi
 miscompile
 modalnavigationdrawer
 modelprop
+monomorphizes
 MOSI
 msgctx
 msgctxt
@@ -453,6 +468,7 @@ optipng
 ospi
 othercomp
 ovmf
+PAKE
 Pantone
 partytown
 PATCHLEVEL
@@ -466,6 +482,7 @@ picotool
 pixabay
 pixelcolor
 pkgs
+poly
 popupwindow
 prec
 prediv
@@ -518,6 +535,7 @@ REFR
 relpath
 remoteviewer
 Renderable
+Renesas
 repr
 reqwest
 respawn
@@ -532,6 +550,7 @@ rowcol
 rsplit
 rspolib
 rsvg
+rtkapplcdms
 rtti
 rustattr
 rustembedded
@@ -571,6 +590,7 @@ Snackbars
 Softbuffer
 Sorkin
 sourcestruct
+spake
 spinboxes
 SPIRAM
 SPRINTF

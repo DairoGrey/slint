@@ -12,9 +12,11 @@ use i_slint_core::graphics::rendering_metrics_collector::{
 };
 use i_slint_core::graphics::{
     Brush, Color, ImageCacheKey, IntRect, Point, Rgba8Pixel, SharedImageBuffer, SharedPixelBuffer,
-    adjust_rect_and_border_for_inner_drawing, euclid,
+    euclid,
 };
-use i_slint_core::input::{InternalKeyEvent, KeyEvent, KeyEventType, MouseEvent, TouchPhase};
+use i_slint_core::input::{
+    BackendDragEvent, BackendMouseEvent, InternalKeyEvent, KeyEvent, KeyEventType, TouchPhase,
+};
 use i_slint_core::item_rendering::{
     CachedRenderingData, ItemCache, ItemRenderer, RenderBorderRectangle, RenderImage,
     RenderRectangle, RenderText,
@@ -209,7 +211,7 @@ cpp! {{
             rust!(Slint_mousePressEvent [rust_window: &QtWindow as "void*", pos: qttypes::QPoint as "QPoint", button: u32 as "int" ] {
                 let position = LogicalPoint::new(pos.x as _, pos.y as _);
                 let button = from_qt_button(button);
-                rust_window.mouse_event(MouseEvent::Pressed{ position, button, click_count: 0, touch_finger_id: 0 })
+                rust_window.mouse_event(BackendMouseEvent::Pressed{ position, button, click_count: 0, touch_finger_id: 0 })
             });
         }
         void mouseReleaseEvent(QMouseEvent *event) override {
@@ -239,7 +241,7 @@ cpp! {{
             rust!(Slint_mouseReleaseEvent [rust_window: &QtWindow as "void*", pos: qttypes::QPoint as "QPoint", button: u32 as "int" ] {
                 let position = LogicalPoint::new(pos.x as _, pos.y as _);
                 let button = from_qt_button(button);
-                rust_window.mouse_event(MouseEvent::Released{ position, button, click_count: 0, touch_finger_id: 0 })
+                rust_window.mouse_event(BackendMouseEvent::Released{ position, button, click_count: 0, touch_finger_id: 0 })
             });
         }
         void mouseMoveEvent(QMouseEvent *event) override {
@@ -248,7 +250,7 @@ cpp! {{
                 return;
             rust!(Slint_mouseMoveEvent [rust_window: &QtWindow as "void*", pos: qttypes::QPoint as "QPoint"] {
                 let position = LogicalPoint::new(pos.x as _, pos.y as _);
-                rust_window.mouse_event(MouseEvent::Moved{position, touch_finger_id: 0})
+                rust_window.mouse_event(BackendMouseEvent::Moved{position, touch_finger_id: 0})
             });
         }
         void wheelEvent(QWheelEvent *event) override {
@@ -275,14 +277,14 @@ cpp! {{
                         TouchPhase::Cancelled
                     },
                 };
-                rust_window.mouse_event(MouseEvent::Wheel{position, delta_x: delta.x as _, delta_y: delta.y as _, phase})
+                rust_window.mouse_event(BackendMouseEvent::Wheel{position, delta_x: delta.x as _, delta_y: delta.y as _, phase})
             });
         }
         void leaveEvent(QEvent *) override {
             if (!rust_window)
                 return;
             rust!(Slint_mouseLeaveEvent [rust_window: &QtWindow as "void*"] {
-                rust_window.mouse_event(MouseEvent::Exit)
+                rust_window.mouse_event(BackendMouseEvent::Exit)
             });
         }
 
@@ -346,7 +348,7 @@ cpp! {{
             if (!rust_window)
                 return;
             rust!(Slint_dragLeaveEvent [rust_window: &QtWindow as "void*"] {
-                rust_window.mouse_event(MouseEvent::Exit)
+                rust_window.drag_leave_event()
             });
         }
 
@@ -423,12 +425,25 @@ cpp! {{
             if (!rust_window)
                 return {};
             auto preferred_size = rust!(Slint_sizeHint [rust_window: &QtWindow as "void*"] -> qttypes::QSize as "QSize" {
-                let component_rc = WindowInner::from_pub(&rust_window.window).component();
+                let window_inner = WindowInner::from_pub(&rust_window.window);
+                let component_rc = window_inner.component();
                 let component = ItemTreeRc::borrow_pin(&component_rc);
                 let layout_info_h = component.as_ref().layout_info(Orientation::Horizontal);
-                let layout_info_v = component.as_ref().layout_info(Orientation::Vertical);
+                let width = layout_info_h.preferred_bounded();
+                let layout_info_v = match window_inner.window_item() {
+                    // The height may depend on the width, so query it at the preferred width.
+                    // Restore the width afterwards: it may hold a size set before the window is shown.
+                    Some(window_item) => {
+                        let current_width = window_item.as_pin_ref().width();
+                        window_item.width.set(LogicalLength::new(width));
+                        let layout_info_v = component.as_ref().layout_info(Orientation::Vertical);
+                        window_item.width.set(current_width);
+                        layout_info_v
+                    }
+                    None => component.as_ref().layout_info(Orientation::Vertical),
+                };
                 qttypes::QSize {
-                    width: layout_info_h.preferred_bounded() as _,
+                    width: width as _,
                     height: layout_info_v.preferred_bounded() as _,
                 }
             });
@@ -477,7 +492,6 @@ cpp! {{
             rust!(Slint_inputMethodEvent [rust_window: &QtWindow as "void*", commit_string: qttypes::QString as "QString",
                 preedit_string: qttypes::QString as "QString", replacement_start: i32 as "int", replacement_length: i32 as "int",
                 preedit_cursor: i32 as "int"] {
-                    let runtime_window = WindowInner::from_pub(&rust_window.window);
                     let mut key_event = KeyEvent::default();
                     key_event.text = i_slint_core::format!("{}", commit_string);
                     let event = InternalKeyEvent {
@@ -489,7 +503,7 @@ cpp! {{
                         .then_some(replacement_start..replacement_start+replacement_length),
                         ..Default::default()
                     };
-                    runtime_window.process_key_input(event);
+                    rust_window.window.dispatch_event(WindowEvent::internal(event));
                 });
         }
         static int gesture_phase(Qt::GestureState state) {
@@ -535,7 +549,7 @@ cpp! {{
                             2 => i_slint_core::input::TouchPhase::Ended,
                             _ => i_slint_core::input::TouchPhase::Cancelled,
                         };
-                        rust_window.mouse_event(MouseEvent::PinchGesture {
+                        rust_window.mouse_event(BackendMouseEvent::PinchGesture {
                             position, delta: scale_delta, phase,
                         });
                         if rotation_delta != 0.0 || matches!(phase,
@@ -543,7 +557,7 @@ cpp! {{
                             | i_slint_core::input::TouchPhase::Ended
                             | i_slint_core::input::TouchPhase::Cancelled)
                         {
-                            rust_window.mouse_event(MouseEvent::RotationGesture {
+                            rust_window.mouse_event(BackendMouseEvent::RotationGesture {
                                 position, delta: rotation_delta, phase,
                             });
                         }
@@ -1125,13 +1139,7 @@ impl ItemRenderer for QtItemRenderer<'_> {
         }
     }
 
-    fn combine_clip(
-        &mut self,
-        mut rect: LogicalRect,
-        radius: LogicalBorderRadius,
-        mut border_width: LogicalLength,
-    ) -> bool {
-        adjust_rect_and_border_for_inner_drawing(&mut rect, &mut border_width);
+    fn combine_clip(&mut self, rect: LogicalRect, radius: LogicalBorderRadius) -> bool {
         let clip_rect = qttypes::QRectF {
             x: rect.min_x() as _,
             y: rect.min_y() as _,
@@ -1286,6 +1294,13 @@ impl ItemRenderer for QtItemRenderer<'_> {
         let painter: &mut QPainterPtr = &mut self.painter;
         cpp! { unsafe [painter as "QPainterPtr*", opacity as "float"] {
             (*painter)->setOpacity((*painter)->opacity() * opacity);
+        }}
+    }
+
+    fn global_alpha_transparent(&self) -> bool {
+        let painter: &QPainterPtr = &self.painter;
+        cpp! { unsafe [painter as "const QPainterPtr*"] -> bool as "bool" {
+            return (*painter)->opacity() == 0;
         }}
     }
 }
@@ -2110,7 +2125,9 @@ impl QtWindow {
         let runtime_window = WindowInner::from_pub(&self.window);
         let window_adapter = runtime_window.window_adapter();
         runtime_window.draw_contents(|components, post_render| {
-            i_slint_core::animations::update_animations();
+            i_slint_core::animations::update_animations(i_slint_core::animations::Instant::now(
+                runtime_window.context(),
+            ));
 
             let mut renderer = QtItemRenderer {
                 painter,
@@ -2161,8 +2178,15 @@ impl QtWindow {
         });
     }
 
-    fn mouse_event(&self, event: MouseEvent) {
-        WindowInner::from_pub(&self.window).process_mouse_input(event);
+    fn mouse_event(&self, event: BackendMouseEvent) {
+        self.window.dispatch_event(WindowEvent::internal(event));
+        timer_event();
+    }
+
+    /// A drag left the window: tear down the hover state like a pointer exit,
+    /// but off the `dispatch_event` path, so that it isn't observed as the pointer leaving the window.
+    fn drag_leave_event(&self) {
+        WindowInner::from_pub(&self.window).process_drag_event(BackendDragEvent::Leave);
         timer_event();
     }
 
@@ -2207,21 +2231,20 @@ impl QtWindow {
         drop_event.data = data;
         drop_event.position = position;
         drop_event.proposed_action = qt_drop_action_to_slint(proposed);
-        let mouse_event = if is_drop {
-            MouseEvent::Drop { event: drop_event, allowed: allowed_actions }
+        let drag_event = if is_drop {
+            BackendDragEvent::Drop { event: drop_event, allowed: allowed_actions }
         } else {
-            MouseEvent::DragMove { event: drop_event, allowed: allowed_actions }
+            BackendDragEvent::Move { event: drop_event, allowed: allowed_actions }
         };
-        let chosen = WindowInner::from_pub(&self.window).process_mouse_input(mouse_event);
+        let chosen = WindowInner::from_pub(&self.window).process_drag_event(drag_event);
         timer_event();
-        chosen
-            .and_then(|r| r.drag_action)
-            .map(slint_drag_action_to_qt)
-            .unwrap_or(key_generated::Qt_DropAction_IgnoreAction)
+        chosen.map(slint_drag_action_to_qt).unwrap_or(key_generated::Qt_DropAction_IgnoreAction)
     }
 
     fn key_event(&self, key: i32, text: qttypes::QString, released: bool, repeat: bool) {
-        i_slint_core::animations::update_animations();
+        i_slint_core::animations::update_animations(i_slint_core::animations::Instant::now(
+            WindowInner::from_pub(&self.window).context(),
+        ));
         let text: String = text.into();
 
         let text = qt_key_to_string(key as key_generated::Qt_Key, text);
@@ -2855,16 +2878,16 @@ thread_local! {
 
 /// Called by C++'s TimerHandler::timerEvent, or every time a timer might have been started
 pub(crate) fn timer_event() {
-    i_slint_core::platform::update_timers_and_animations();
+    if let Some(ctx) = crate::context() {
+        ctx.update_timers_and_animations();
+    }
     restart_timer();
 }
 
 pub(crate) fn restart_timer() {
-    let timeout = i_slint_core::timers::TimerList::next_timeout().map(|instant| {
-        let now = std::time::Instant::now();
-        let instant: std::time::Instant = instant.into();
-        if instant > now { instant.duration_since(now).as_millis() as i32 } else { 0 }
-    });
+    let timeout = crate::context()
+        .and_then(|ctx| ctx.duration_until_next_timer_update())
+        .map(|d| d.as_millis() as i32);
     if let Some(timeout) = timeout {
         cpp! { unsafe [timeout as "int"] {
             ensure_initialized(true);

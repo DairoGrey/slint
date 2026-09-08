@@ -19,6 +19,17 @@ enum ElementAccessibilityAction {
     Expand = 3;
 }
 
+enum Orientation {
+    Horizontal = 0;
+    Vertical = 1;
+}
+
+enum AccessibleLiveness {
+    Off = 0;
+    Polite = 1;
+    Assertive = 2;
+}
+
 enum PointerEventButton {
     Left = 0;
     Right = 1;
@@ -147,6 +158,7 @@ enum AccessibleRole {
     Navigation = 26;
     Region = 27;
     Search = 28;
+    WindowTitleBar = 29;
 }
 
 enum RecordedEventResult {
@@ -155,7 +167,6 @@ enum RecordedEventResult {
     Unspecified = 0;
     Accepted = 1;
     Rejected = 2;
-    Ignored = 3;
 }
 
 message ElementQueryInstruction {
@@ -216,6 +227,19 @@ message RequestElementDrag {
 message RequestDispatchWindowEvent {
     Handle window_handle = 1;
     WindowEvent event = 2;
+}
+
+// Not part of RequestToAUT: moving the pointer, hovering, and clearing a hover
+// all boil down to dispatching a PointerMoveEvent via RequestDispatchWindowEvent,
+// which the wire protocol already supports. These messages exist only to give the
+// move_pointer/hover_element MCP tools their own minimal input schema.
+message RequestMovePointer {
+    Handle window_handle = 1;
+    LogicalPosition position = 2;
+}
+
+message RequestHoverElement {
+    Handle element_handle = 1;
 }
 
 message RequestDispatchKeyEvent {
@@ -340,6 +364,12 @@ message ElementPropertiesResponse {
     bool accessible_enabled = 15;
     bool accessible_read_only = 16;
     LayoutKind layout_kind = 17;
+    bool accessible_item_selectable = 18;
+    bool accessible_item_selected = 19;
+    uint32 accessible_item_count = 20;
+    uint32 accessible_item_index = 21;
+    Orientation accessible_orientation = 22;
+    AccessibleLiveness accessible_live_region = 23;
 }
 
 message InvokeElementAccessibilityActionResponse {

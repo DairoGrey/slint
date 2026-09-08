@@ -45,6 +45,7 @@ x11 = [
 renderer-femtovg = ["i-slint-renderer-femtovg/opengl", "dep:glutin", "dep:glutin-winit"]
 renderer-femtovg-wgpu = ["i-slint-renderer-femtovg/wgpu", "dep:i-slint-renderer-femtovg", "unstable-wgpu-30"]
 renderer-skia = ["i-slint-renderer-skia"]
+renderer-vello = ["dep:i-slint-renderer-anyrender", "i-slint-renderer-anyrender/vello", "unstable-wgpu-29"]
 renderer-skia-opengl = ["renderer-skia", "i-slint-renderer-skia/opengl"]
 renderer-skia-vulkan = ["renderer-skia", "i-slint-renderer-skia/vulkan"]
 renderer-software = [
@@ -55,7 +56,7 @@ renderer-software = [
   "i-slint-renderer-software/std",
   "dep:bytemuck",
 ]
-accessibility = ["dep:accesskit", "dep:accesskit_winit"]
+accessibility = ["dep:accesskit", "dep:accesskit_winit", "i-slint-core/accessibility-text"]
 raw-window-handle-06 = ["i-slint-core/raw-window-handle-06"]
 unstable-wgpu-29 = ["i-slint-core/unstable-wgpu-29", "i-slint-renderer-skia?/unstable-wgpu-29"]
 unstable-wgpu-30 = [
@@ -71,7 +72,6 @@ i-slint-core-macros = { workspace = true, features = ["default"] }
 i-slint-common = { workspace = true, features = ["default"] }
 
 cfg-if = "1"
-derive_more = { workspace = true }
 lyon_path = { workspace = true }
 pin-weak = "1"
 scoped-tls-hkt = "0.1"
@@ -85,6 +85,9 @@ i-slint-renderer-femtovg = { workspace = true, features = ["default"], optional 
 
 # For the Skia renderer
 i-slint-renderer-skia = { workspace = true, features = ["default"], optional = true }
+
+# For the vello renderer
+i-slint-renderer-anyrender = { workspace = true, optional = true }
 
 # For the software renderer
 i-slint-renderer-software = { workspace = true, optional = true }

@@ -644,14 +644,14 @@ impl ElementHandle {
     }
 
     /// Selects the text between two UTF-8 offsets, by invoking the element's
-    /// `accessible-action-set-selection` callback. Note that you can only do this if that callback
+    /// `accessible-action-set-selection-offsets` callback. Note that you can only do this if that callback
     /// is declared in your Slint code.
-    pub fn set_accessible_selection(&self, anchor: i32, focus: i32) {
+    pub fn set_accessible_selection_offsets(&self, anchor: i32, focus: i32) {
         if self.element_index != 0 {
             return;
         }
         if let Some(item) = self.item.upgrade() {
-            item.accessible_action(&AccessibilityAction::SetSelection(anchor, focus))
+            item.accessible_action(&AccessibilityAction::SetSelectionOffsets(anchor, focus))
         }
     }
 
@@ -933,7 +933,7 @@ impl ElementHandle {
         }
     }
 
-    fn window_adapter(&self) -> Option<Rc<dyn i_slint_core::window::WindowAdapter>> {
+    pub(crate) fn window_adapter(&self) -> Option<Rc<dyn i_slint_core::window::WindowAdapter>> {
         self.item.upgrade().and_then(|item| item.window_adapter())
     }
 
@@ -1071,10 +1071,21 @@ impl ElementHandle {
         mock_drag_window(window_adapter.window(), self.absolute_center(), target, button);
     }
 
-    fn absolute_center(&self) -> LogicalPosition {
-        let item_pos = self.absolute_position();
-        let item_size = self.size();
-        LogicalPosition::new(item_pos.x + item_size.width / 2., item_pos.y + item_size.height / 2.)
+    /// The center of the element in the coordinate system that input events are dispatched in.
+    /// Unlike [`Self::absolute_position()`] this includes the location of an enclosing popup that's
+    /// rendered inside the window, such as a menu.
+    pub(crate) fn absolute_center(&self) -> LogicalPosition {
+        let Some(item) = self.item.upgrade() else {
+            return Default::default();
+        };
+        let geometry = item.geometry();
+        let position = i_slint_core::lengths::logical_position_to_api(
+            item.map_to_native_window(geometry.origin),
+        );
+        LogicalPosition::new(
+            position.x + geometry.width() / 2.,
+            position.y + geometry.height() / 2.,
+        )
     }
 
     pub fn scroll(&self, delta_x: f32, delta_y: f32) {

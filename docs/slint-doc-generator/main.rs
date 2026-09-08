@@ -22,8 +22,8 @@ struct Cli {
     experimental: bool,
 
     /// Generate the SC-filtered reference into docs/safety instead of docs/astro.
-    /// Only items annotated with `\sc` are included, and screenshot code-fence
-    /// attributes are stripped.
+    /// Only elements and members declared `@sc` are included, and screenshot
+    /// code-fence attributes are stripped.
     #[arg(long, action)]
     slint_sc: bool,
 
@@ -84,7 +84,7 @@ pub struct Config {
     /// of the site the pages belong to. Pages carry an explicit `slug`, so
     /// this location doesn't determine their URL.
     pub generated_dir: PathBuf,
-    /// Skip items that don't carry a `\sc` marker in their doc comment.
+    /// Skip elements and members not declared `@sc`, and every builtin enum and struct.
     pub sc_only: bool,
     /// Strip screenshot code-fence attributes instead of wrapping with
     /// `<CodeSnippetMD>`.
@@ -140,18 +140,18 @@ impl Config {
         self.generated_dir.join("reference")
     }
 
-    /// Generated pages of the qualification plan (safety manual only).
-    pub fn qualification_plan_dir(&self) -> PathBuf {
-        self.generated_dir.join("qualification-plan")
+    /// Generated pages of the qualification report (safety manual only).
+    pub fn qualification_report_dir(&self) -> PathBuf {
+        self.generated_dir.join("qualification-report")
     }
 
-    /// Create a page of the qualification plan, ready for writing.
+    /// Create a page of the qualification report, ready for writing.
     pub fn qualification_page(
         &self,
         file_name: &str,
     ) -> anyhow::Result<std::io::BufWriter<std::fs::File>> {
         use anyhow::Context;
-        let dir = self.qualification_plan_dir();
+        let dir = self.qualification_report_dir();
         std::fs::create_dir_all(&dir).with_context(|| format!("error creating {dir:?}"))?;
         let path = dir.join(file_name);
         Ok(std::io::BufWriter::new(

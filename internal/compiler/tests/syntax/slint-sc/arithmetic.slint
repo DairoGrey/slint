@@ -1,8 +1,8 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
-// Arithmetic uses `+`, `-`, and `*` on numbers and lengths. Division, a unit
-// product (a length times a length), and comparison are not in the subset.
+// Arithmetic uses `+`, `-`, and `*` on numbers and lengths. Division and a unit
+// product (a length times a length) are not in the subset.
 
 export component Test inherits Window {
     in property <length> w;
@@ -23,10 +23,9 @@ export component Test inherits Window {
 
     // Division is not in the subset.
     out property <length> quotient: w / a;
-//                                  >   <error{Binary expressions are not supported in Slint SC}
+//                                  >   <error{Operator '/' not supported in Slint SC}
 
     // A length times a length is a unit product, not a length.
     out property <length> area: w * w;
-//                              >   <error{Binary expressions are not supported in Slint SC}
-//                              >    <^error{Cannot convert (px²) to length}
+//                              >    <error{Cannot convert (px²) to length}
 }
